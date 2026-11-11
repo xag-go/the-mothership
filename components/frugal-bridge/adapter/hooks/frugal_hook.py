@@ -1,16 +1,31 @@
 #!/usr/bin/env python3
-"""Frugal-Bridge hook for Claude Code (SessionStart + UserPromptSubmit).
+"""Frugal-Bridge hook: one script for every agent tool with command hooks.
 
-SessionStart: tell the agent to read the "now" and "user" slot files first, in one call (project .kits.json slots or
-PROGRESS.md / USER.md, else the connected knowledge base's slots, else Frugal's own USER.md; folders expanded).
-UserPromptSubmit: read the transcript's last assistant usage; past 150k context tokens (100k on Haiku), once per
-threshold, ask Claude to offer a new session + handoff at the end of its reply; at 300k say it plainly.
-State: ~/.claude/frugal-bridge/state.json. Install: see ../README.md.
+    python3 frugal_hook.py [--tool NAME] [--event start|prompt|post_tool|usage|precompact]   (event JSON on stdin)
+
+Tools: claude-code (default), codex, gemini, qwen, copilot, junie, droid, devin, continue, cursor, kiro, crush, cline,
+grok. The event comes from --event, else from the payload's own event name. What it does:
+- start: tell the agent which "now" / "user" files to read first, in one call (start-files block below); Cursor has no
+  global rules file, so there the rules text ($FRUGAL_HOME/RULES.md) comes with it.
+- prompt: context watch: past 150k tokens (100k on cheap models), once per threshold, ask the agent to offer a new
+  session with a handoff; at 300k say it plainly. Context = the transcript's last usage, else the last usage logged.
+- post_tool: shell output over ~12k chars is cut to head + error lines + tail (full text saved, path given), in the
+  tool's own replace-output field (Claude Code updatedToolOutput, Junie updatedToolOutput, Copilot modifiedResult,
+  Crush updated_output, Gemini AfterTool deny+reason, Codex PostToolUse block+reason). Tools without one: nothing.
+- usage: token usage of each model call to $FRUGAL_HOME/usage.jsonl (same record as the Hermes plugin, plus `tool`):
+  Claude-style transcripts (Stop), Codex PostModelRequest token_usage, Cursor preCompact context tokens.
+Runs once per event: tools that also run Claude Code's hooks (Cursor, Grok, Devin, Continue cn, Copilot with a
+repo .claude/settings.json) would call it twice; the Claude entry stands down when the calling tool has its own
+Frugal entry, and a short-lived marker per event payload drops any second call. Never fails the tool: any error =
+no output, exit 0.
 """
-import json, os, sys
+import hashlib, json, os, re, sys, time
 
 WARN, HARD, WARN_CHEAP = 150000, 300000, 100000
-STATE = os.path.expanduser("~/.claude/frugal-bridge/state.json")
+OUT_LIMIT = 12000
+CHEAP = ("haiku", "flash", "mini", "luna", "nano")
+ERR = re.compile(r"(error|exception|traceback|failed|fail\b|fatal|panic|denied|not found|warning)", re.I)
+STATE = os.path.expanduser("~/.claude/frugal-bridge/state.json")   # warn flags (older installs keep their file)
 
 
 # >>> frugal-bridge start-files (shared: identical copy in adapter/hooks, adapter/plugin, adapter/proxy; a test checks)
@@ -179,26 +194,7 @@ def start_hint(project_dir=None, tag="[frugal-bridge]"):
 # <<< frugal-bridge start-files
 
 
-def last_usage(path):
-    ctx, model = 0, ""
-    try:
-        with open(path) as fh:
-            for line in fh:
-                try:
-                    r = json.loads(line)
-                except Exception:
-                    continue
-                m = r.get("message") or {}
-                u = m.get("usage") if isinstance(m, dict) else None
-                if r.get("type") == "assistant" and u:
-                    ctx = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
-                           + u.get("cache_creation_input_tokens", 0))
-                    model = m.get("model", model)
-    except OSError:
-        pass
-    return ctx, model
-
-
+# ---------------------------------------------------------------- state, once-guard, host
 def load_state():
     try:
         return json.load(open(STATE))
@@ -211,28 +207,348 @@ def save_state(s):
     json.dump(s, open(STATE, "w"))
 
 
-def main():
-    ev = json.load(sys.stdin)
-    name = ev.get("hook_event_name", "")
-    out = None
-    if name == "SessionStart":
-        d = ev.get("cwd") or os.getcwd()
-        out = start_hint(d)
-    elif name == "UserPromptSubmit":
-        ctx, model = last_usage(ev.get("transcript_path", ""))
-        warn = WARN_CHEAP if "haiku" in (model or "").lower() else WARN
-        s = load_state(); sid = ev.get("session_id", "?"); done = set(s.get(sid, []))
-        if ctx >= HARD and "hard" not in done:
-            done |= {"hard", "warn"}
-            out = (f"[frugal-bridge] This chat is at ~{ctx // 1000}k tokens. Finish the current step, then tell the user "
-                   "plainly (one line, end of reply) that a new session is needed, and write the handoff first.")
-        elif ctx >= warn and "warn" not in done:
-            done.add("warn")
-            out = (f"[frugal-bridge] This chat is at ~{ctx // 1000}k tokens. At the end of your reply add one short line "
-                   "offering: new session with handoff (default) / compact / carry on.")
-        s[sid] = sorted(done); save_state(s)
+def _hstate_path():
+    return os.path.join(frugal_home(), "hook-state.json")
+
+
+def load_hstate():
+    v = _sf_json(_hstate_path())
+    return v if isinstance(v, dict) else {}
+
+
+def save_hstate(s):
+    try:
+        os.makedirs(frugal_home(), exist_ok=True)
+        tmp = _hstate_path() + f".{os.getpid()}"
+        json.dump(s, open(tmp, "w"))
+        os.replace(tmp, _hstate_path())
+    except OSError:
+        pass
+
+
+def once(event, raw, ev=None):
+    """True for the first call with this event payload (and transcript state) in the last two minutes: a second
+    hook entry for the same event gets False."""
+    ev = ev or {}
+    if not any(ev.get(k) for k in ("session_id", "sessionId", "conversation_id", "taskId")):
+        return True          # no session id: cannot tell a second entry from a new session, so never drop
+    d = os.path.join(frugal_home(), "once")
+    tp = ev.get("transcript_path")
+    try:
+        st = os.stat(tp) if isinstance(tp, str) and tp else None
+        raw = raw + (f"\0{st.st_size}:{st.st_mtime_ns}".encode() if st else b"")
+    except OSError:
+        pass
+    try:
+        os.makedirs(d, exist_ok=True)
+        now = time.time()
+        for f in os.listdir(d):
+            try:
+                if now - os.path.getmtime(os.path.join(d, f)) > 120:
+                    os.remove(os.path.join(d, f))
+            except OSError:
+                pass
+        key = hashlib.sha256((event + "\0").encode() + raw).hexdigest()[:32]
+        fd = os.open(os.path.join(d, key), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except OSError:
+        return True
+
+
+def native_hooks():
+    return set(_sf_json(os.path.join(frugal_home(), "global.json")).get("native_hooks") or [])
+
+
+def detect_host(ev, tool):
+    """The tool that is really calling (payload marks), else the --tool the entry was written for."""
+    if "cursor_version" in ev:
+        return "cursor"
+    if "clineVersion" in ev:
+        return "cline"
+    if "sessionId" in ev and "hook_event_name" not in ev and "session_id" not in ev:
+        return "copilot"
+    if tool == "claude-code" and (os.environ.get("GEMINI_SESSION_ID") or os.environ.get("GEMINI_PROJECT_DIR")):
+        return "gemini"
+    return tool
+
+
+EVENTS = {"SessionStart": "start", "sessionStart": "start", "TaskStart": "start", "TaskResume": "start",
+          "UserPromptSubmit": "prompt", "userPromptSubmitted": "prompt", "BeforeAgent": "prompt",
+          "PostToolUse": "post_tool", "postToolUse": "post_tool", "AfterTool": "post_tool",
+          "Stop": "usage", "PostModelRequest": "usage", "SubagentStop": "usage",
+          "preCompact": "precompact", "PreCompact": "precompact"}
+NATIVE_NAME = {("gemini", "prompt"): "BeforeAgent", ("gemini", "post_tool"): "AfterTool"}
+
+
+def native_event(host, ev_kind, ev):
+    return (ev.get("hook_event_name") or ev.get("hookEventName") or NATIVE_NAME.get((host, ev_kind))
+            or {"start": "SessionStart", "prompt": "UserPromptSubmit", "post_tool": "PostToolUse"}.get(ev_kind, ""))
+
+
+# ---------------------------------------------------------------- usage
+def norm_usage(u):
+    """Any tool's token counts -> (input w/o cache, output, cache_read, cache_write, context)."""
+    if not isinstance(u, dict):
+        return None
+    g = lambda *ks: next((int(u[k]) for k in ks if isinstance(u.get(k), (int, float))), 0)
+    for k in ("last_token_usage", "last", "usage", "usageMetadata"):
+        if isinstance(u.get(k), dict):
+            u = u[k]
+            break
+    cr = g("cache_read_input_tokens", "cached_input_tokens", "cachedContentTokenCount", "cache_read")
+    cw = g("cache_creation_input_tokens", "cache_write")
+    out = g("output_tokens", "completion_tokens", "candidatesTokenCount", "output")
+    if "cache_read_input_tokens" in u or "cache_creation_input_tokens" in u:   # Anthropic: input excludes cache
+        inp = g("input_tokens")
+    else:                                                                       # OpenAI / Gemini: input includes it
+        inp = max(g("input_tokens", "prompt_tokens", "promptTokenCount", "input") - cr, 0)
+    if not (inp or out or cr or cw):
+        return None
+    return inp, out, cr, cw, inp + cr + cw
+
+
+def log_usage(tool, session, model, n, provider=""):
+    inp, out, cr, cw, ctx = n
+    rec = dict(ts=time.time(), session=session, model=model, provider=provider, context=ctx, input=inp, output=out,
+               cache_read=cr, cache_write=cw, tool=tool)
+    try:
+        os.makedirs(frugal_home(), exist_ok=True)
+        with open(os.path.join(frugal_home(), "usage.jsonl"), "a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+
+
+def transcript_usages(path, offset=0):
+    """New assistant usages in a Claude-style JSONL transcript from byte offset: ([(id, model, usage)], new offset)."""
+    out = []
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            data = fh.read()
+    except (OSError, TypeError):
+        return out, offset
+    end = data.rfind(b"\n") + 1
+    for line in data[:end].splitlines():
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        m = r.get("message") if isinstance(r, dict) else None
+        if isinstance(m, dict) and r.get("type") == "assistant" and isinstance(m.get("usage"), dict):
+            out.append((m.get("id") or r.get("uuid") or "", m.get("model", ""), m["usage"]))
+    return out, offset + end
+
+
+def last_usage(path):
+    """(context tokens, model) of the transcript's last assistant message."""
+    us, _ = transcript_usages(path)
+    if not us:
+        return 0, ""
+    n = norm_usage(us[-1][2])
+    return (n[4] if n else 0), us[-1][1]
+
+
+def is_cheap(model):
+    return any(k in (model or "").lower() for k in CHEAP)
+
+
+# ---------------------------------------------------------------- output filter
+def filter_output(text, limit=OUT_LIMIT, label="shell"):
+    """Cut a big output to head + error lines + tail; save the full text. Returns new text or None."""
+    if not isinstance(text, str) or len(text) <= limit:
+        return None
+    lines = text.splitlines()
+    head, tail = lines[:40], lines[-60:]
+    errs = [f"{i + 1}: {l[:300]}" for i, l in enumerate(lines[40:-60], start=40) if ERR.search(l)][:40]
+    path = ""
+    try:
+        d = os.path.join(frugal_home(), "outputs")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f"{time.strftime('%Y%m%d-%H%M%S')}-{label}-{os.getpid()}.log")
+        open(path, "w").write(text)
+    except OSError:
+        path = ""
+    out = ["\n".join(head), f"\n[frugal-bridge] output cut: {len(lines)} lines, {len(text)} chars."]
+    if errs:
+        out.append("Error-looking lines in the cut part:\n" + "\n".join(errs))
+    out.append("... last 60 lines:\n" + "\n".join(tail))
+    if path:
+        out.append(f"[full output saved: {path} — grep it instead of re-running]")
+    return "\n".join(out)
+
+
+SHELL = re.compile(r"^(bash|shell|run_shell_command|terminal|exec|local_shell|execute_command|powershell)$", re.I)
+
+
+def tool_output(host, ev):
+    """(tool name, output text or {stdout, stderr} dict) of a post-tool event."""
+    if host == "copilot":
+        r = ev.get("toolResult") or {}
+        return ev.get("toolName", ""), r.get("textResultForLlm") if isinstance(r, dict) else None
+    name = ev.get("tool_name") or ev.get("toolName") or ""
+    r = ev.get("tool_response", ev.get("tool_result"))
+    if host == "gemini" and isinstance(r, dict):
+        r = r.get("llmContent") if isinstance(r.get("llmContent"), str) else r.get("returnDisplay")
+    if isinstance(r, dict) and "text_result_for_llm" in r:
+        r = r["text_result_for_llm"]
+    return name, r
+
+
+def post_tool(host, ev):
+    name, r = tool_output(host, ev)
+    if name and not SHELL.match(name):
+        return None
+    if host == "claude-code" and isinstance(r, dict):
+        so, se = filter_output(r.get("stdout")), filter_output(r.get("stderr"), label="stderr")
+        if not (so or se):
+            return None
+        new = dict(r, stdout=so or r.get("stdout", ""), stderr=se or r.get("stderr", ""))
+        return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": new}}
+    if isinstance(r, dict):
+        r = "\n".join(str(r.get(k) or "") for k in ("stdout", "stderr", "output") if r.get(k))
+    cut = filter_output(r)
+    if not cut:
+        return None
+    if host in ("claude-code", "junie"):
+        return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": cut}}
+    if host == "copilot":
+        return {"modifiedResult": {"resultType": "success", "textResultForLlm": cut}}
+    if host == "crush":
+        return {"updated_output": cut}
+    if host == "gemini":
+        return {"decision": "deny", "reason": cut}
+    if host == "codex":
+        return {"decision": "block", "reason": cut}
+    return None
+
+
+# ---------------------------------------------------------------- context watch
+def context_notice(host, ev):
+    sid = ev.get("session_id") or ev.get("sessionId") or ev.get("conversation_id") or ev.get("taskId") or "?"
+    ctx, model = last_usage(ev.get("transcript_path") or "")
+    if not ctx:
+        st = (load_hstate().get("ctx") or {}).get(f"{host}:{sid}") or {}
+        ctx, model = st.get("ctx", 0), st.get("model", "")
+    warn = WARN_CHEAP if is_cheap(model) else WARN
+    s = load_state(); done = set(s.get(sid, [])); out = None
+    if ctx >= HARD and "hard" not in done:
+        done |= {"hard", "warn"}
+        out = (f"[frugal-bridge] This chat is at ~{ctx // 1000}k tokens. Finish the current step, then tell the user "
+               "plainly (one line, end of reply) that a new session is needed, and write the handoff first.")
+    elif ctx >= warn and "warn" not in done:
+        done.add("warn")
+        out = (f"[frugal-bridge] This chat is at ~{ctx // 1000}k tokens. At the end of your reply add one short line "
+               "offering: new session with handoff (default) / compact / carry on.")
     if out:
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": name, "additionalContext": out}}))
+        s[sid] = sorted(done); save_state(s)
+    return out
+
+
+def remember_ctx(host, sid, model, ctx):
+    s = load_hstate()
+    c = s.setdefault("ctx", {})
+    c[f"{host}:{sid}"] = {"ctx": ctx, "model": model, "ts": time.time()}
+    if len(c) > 500:
+        for k in sorted(c, key=lambda k: c[k].get("ts", 0))[:-300]:
+            del c[k]
+    save_hstate(s)
+
+
+def usage(host, ev):
+    sid = ev.get("session_id") or ev.get("sessionId") or ev.get("conversation_id") or "?"
+    if ev.get("token_usage") is not None or host == "codex":
+        n = norm_usage(ev.get("token_usage"))
+        if n:
+            log_usage(host, sid, ev.get("model", ""), n); remember_ctx(host, sid, ev.get("model", ""), n[4])
+        return
+    tp = ev.get("transcript_path")
+    if tp:
+        s = load_hstate(); offs = s.setdefault("offsets", {}); seen = s.setdefault("seen", {})
+        key = f"{host}:{sid}"
+        us, new = transcript_usages(tp, offs.get(key, 0))
+        ids = set(seen.get(key, []))
+        for mid, model, u in us:
+            if mid and mid in ids:
+                continue
+            n = norm_usage(u)
+            if n:
+                log_usage(host, sid, model, n)
+            ids.add(mid)
+        offs[key] = new; seen[key] = sorted(ids)[-200:]
+        save_hstate(s)
+
+
+def precompact(host, ev):
+    ctx = ev.get("context_tokens")
+    if isinstance(ctx, (int, float)) and ctx:
+        sid = ev.get("conversation_id") or ev.get("session_id") or "?"
+        log_usage(host, sid, ev.get("model", ""), (0, 0, 0, 0, int(ctx)))
+        remember_ctx(host, sid, ev.get("model", ""), int(ctx))
+
+
+# ---------------------------------------------------------------- output per tool
+def emit(host, kind, ev, text):
+    if host == "kiro":
+        return text                                   # Kiro: plain stdout is added to the context
+    if host == "cline":
+        return json.dumps({"cancel": False, "contextModification": text})
+    if host == "cursor":
+        return json.dumps({"additional_context": text})
+    if host == "copilot":
+        return json.dumps({"additionalContext": text})
+    return json.dumps({"hookSpecificOutput": {"hookEventName": native_event(host, kind, ev), "additionalContext": text}})
+
+
+def start_text(host, ev):
+    d = ev.get("cwd") or (ev.get("workspace_roots") or ev.get("workspaceRoots") or [None])[0] or os.getcwd()
+    hint = start_hint(d)
+    if host == "cursor":   # no global rules file in Cursor: the rules come with the session start
+        rules = _sf_text(os.path.join(frugal_home(), "RULES.md"))
+        return "\n\n".join(x for x in (rules, hint) if x) or None
+    return hint
+
+
+def run(argv, raw):
+    tool = argv[argv.index("--tool") + 1] if "--tool" in argv else "claude-code"
+    try:
+        ev = json.loads(raw or b"{}")
+    except Exception:
+        ev = {}
+    ev = ev if isinstance(ev, dict) else {}
+    kind = argv[argv.index("--event") + 1] if "--event" in argv else EVENTS.get(
+        ev.get("hook_event_name") or ev.get("hookEventName") or ev.get("hookName") or "", "")
+    host = detect_host(ev, tool)
+    if tool == "claude-code" and host != "claude-code" and host in native_hooks():
+        return None                                    # that tool runs its own Frugal entry: stand down
+    if not kind or not once(kind, raw or b"", ev):
+        return None
+    if kind == "start":
+        t = start_text(host, ev)
+        return emit(host, kind, ev, t) if t else None
+    if kind == "prompt":
+        t = context_notice(host, ev)
+        return emit(host, kind, ev, t) if t else None
+    if kind == "post_tool":
+        o = post_tool(host, ev)
+        return json.dumps(o) if o else None
+    if kind == "usage":
+        usage(host, ev)
+    elif kind == "precompact":
+        precompact(host, ev)
+    return None
+
+
+def main():
+    try:
+        out = run(sys.argv, sys.stdin.buffer.read())
+    except Exception:
+        out = None
+    if out:
+        print(out)
 
 
 if __name__ == "__main__":

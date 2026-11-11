@@ -2,8 +2,10 @@
 """The Mothership: one install for Skeleton Base (knowledge base) + Frugal-Bridge (token-saving rules).
 
 Usage
-  python3 install.py [install] [--base DIR] [--yes] [--no-frugal] [--watch|--no-watch] [--timer] [--dry-run] [--force]
+  python3 install.py [install] [--base DIR] [--yes] [--no-frugal] [--watch|--no-watch] [--timer] [--mcp] [--dry-run]
+                               [--force]
   python3 install.py check | status            [--base DIR]
+  python3 install.py report [DAYS]             token usage of every tool Frugal-Bridge logs (its setup.py report)
   python3 install.py update                     [--base DIR] [--yes] [--force]
   python3 install.py uninstall                  [--base DIR] [--yes] [--keep-backups] [--no-backup] [--backup-dir DIR]
                                                 [--purge [--yes-purge-BASENAME]]
@@ -25,7 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.0.9"
+VERSION = "1.1.0"
 ROOT = Path(__file__).resolve().parent
 LOCK = "components.lock"
 STATE = ".mothership.json"
@@ -114,15 +116,45 @@ def is_linux():
     return platform_name().startswith("linux")
 
 
+def sb_tools_table(root=ROOT):
+    """Skeleton Base's own tool table (brain.py TOOLS, 1.4.0+) from the vendored copy; {} when it has none."""
+    f = Path(root) / "components" / SB / "tools" / "brain.py"
+    src = read(f) or ""
+    if "\nTOOLS = " not in src:
+        return {}
+    import importlib.util
+    try:
+        spec = importlib.util.spec_from_file_location("mothership_sb_brain", f)
+        mod = importlib.util.module_from_spec(spec)
+        old = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(mod)
+        finally:
+            sys.dont_write_bytecode = old
+        return dict(getattr(mod, "TOOLS", {}) or {})
+    except Exception:                    # an unreadable table only costs the extra paths below
+        return {}
+
+
 def tool_rules_files():
-    """User-level rules files Skeleton Base may connect (used to find an already connected base)."""
+    """User-level rules files Skeleton Base may connect (used to find an already connected base): every rules file
+    of its tool table (all known tools), plus the fixed list older Skeleton Base releases used."""
     e, h = os.environ.get, home()
     c = Path(e("CLAUDE_CONFIG_DIR") or h / ".claude")
     x = Path(e("CODEX_HOME") or h / ".codex")
     m = Path(e("HERMES_HOME") or h / ".hermes")
-    return [c / "CLAUDE.md", x / "AGENTS.md", h / ".gemini/GEMINI.md", h / ".qwen/QWEN.md",
-            h / ".config/opencode/AGENTS.md", h / ".codeium/windsurf/memories/global_rules.md",
-            h / ".kiro/steering/skeleton-base.md", h / ".openclaw/workspace/AGENTS.md", m / "SOUL.md"]
+    out = [c / "CLAUDE.md", x / "AGENTS.md", h / ".gemini/GEMINI.md", h / ".qwen/QWEN.md",
+           h / ".config/opencode/AGENTS.md", h / ".codeium/windsurf/memories/global_rules.md",
+           h / ".kiro/steering/skeleton-base.md", h / ".openclaw/workspace/AGENTS.md", m / "SOUL.md"]
+    roots = {".claude": c, ".codex": x, ".hermes": m}
+    for row in sb_tools_table().values():
+        for rel, _how in row.get("rules") or ():
+            first, rest = (rel.split("/", 1) + [""])[:2]
+            f = (roots[first] / rest) if first in roots and rest else h / rel
+            if f not in out:
+                out.append(f)
+    return out
 
 
 def json_configs():
@@ -572,7 +604,7 @@ class Mothership:
             raise Fail(f"nothing to update: {base / STATE} not found (run install first)")
         resumed = bool(journal)
         st = journal or prev or {}
-        opts = {"frugal": True, "watch": True, "timer": False}
+        opts = {"frugal": True, "watch": True, "timer": False, "mcp": False}
         opts.update(st.get("options") or {})          # a re-run or update keeps the first install's choices
         if self.a.no_frugal:
             opts["frugal"] = False
@@ -580,6 +612,8 @@ class Mothership:
             opts["watch"] = self.a.watch
         if self.a.timer:
             opts["timer"] = True
+        if self.a.mcp:
+            opts["mcp"] = True                       # kept for re-runs and updates, like the other choices
         if not is_linux():
             opts["watch"] = opts["timer"] = False
         own = dict(st.get("own") or {})
@@ -605,6 +639,7 @@ class Mothership:
                            f"{home() / 'skeleton-base-home'}) and run again with --base, or use --no-frugal.")
         keep = self.newer_base(base)
         connect_flags = ["--watch"] if opts["watch"] else (["--timer"] if opts["timer"] else [])
+        self.connect_extra = ["--mcp"] if opts.get("mcp") else []
 
         plan = self.plan(base, opts, own, connect_flags, keep)
         if self.a.dry_run:
@@ -687,12 +722,15 @@ class Mothership:
                      + f" Skeleton Base in {base} (brain.py init --frugal=no)")
         if opts["frugal"]:
             p.append(f"install Frugal-Bridge into the base (kit/setup.py install {base})")
-        p.append("connect the base for this user: pointer blocks in your AI tools' user rules files, Claude Code "
-                 "hooks" + (", systemd user units (watcher + daily timer)" if flags == ["--watch"] else
-                            ", a daily systemd user timer" if flags else ""))
+        p.append("connect the base for this user and every AI tool found (Skeleton Base's tool table: one pointer "
+                 "block per tool, the base on each tool's own allow list, Claude Code hooks"
+                 + (", the base's MCP server in each tool's MCP config" if opts.get("mcp") else "")
+                 + (", systemd user units (watcher + daily timer)" if flags == ["--watch"] else
+                    ", a daily systemd user timer" if flags else "") + ")")
         if opts["frugal"]:
-            p.append("install Frugal-Bridge for this user (kit/setup.py install --global), after the base block, "
-                     "using the base as its user file")
+            p.append("install Frugal-Bridge for this user and every AI tool found (kit/setup.py install --global "
+                     "--hosts auto: its hosts table; rules after the base block, hooks / plugins, helper tiers "
+                     "model + effort), using the base as its user file")
         if is_linux() and flags:
             p.append("enable the units with systemctl --user (--yes) or print the command")
         elif not is_linux():
@@ -792,16 +830,17 @@ class Mothership:
 
         kit = self.frugal_kit_for_base(own)
         env = {"FRUGAL_BRIDGE_KIT": str(kit)} if (use_frugal and kit) else {}
-        self.say("- Skeleton Base: connect for this user " + " ".join(flags))
-        self.py(base / "tools" / "brain.py", "connect", "--base", base, *flags, env=env)
+        extra = getattr(self, "connect_extra", [])
+        self.say("- Skeleton Base: connect for this user and every tool found " + " ".join(flags + extra))
+        self.py(base / "tools" / "brain.py", "connect", "--base", base, *flags, *extra, env=env)
         self.track("connect")
 
         if opts["frugal"]:
             if own.get("frugal_global") == "adopted" and kit != self.fbk:
                 self.say(f"- Frugal-Bridge for this user: already installed (its own kit {kit}); re-run by connect")
             else:
-                self.say("- Frugal-Bridge: install for this user (--global)")
-                self.py(self.fbk / "kit" / "setup.py", "install", "--global")
+                self.say("- Frugal-Bridge: install for this user and every tool found (--global --hosts auto)")
+                self.py(self.fbk / "kit" / "setup.py", "install", "--global", *self.frugal_hosts_arg())
         self.track("frugal-global")
 
         self.set_kit_key(own)
@@ -810,7 +849,7 @@ class Mothership:
         self.claude_access(base)
         self.track("claude-access")
 
-        self.py(base / "tools" / "brain.py", "connect", "--base", base, *flags, env=env)
+        self.py(base / "tools" / "brain.py", "connect", "--base", base, *flags, *extra, env=env)
         rc, out = self.py(base / "tools" / "brain.py", "map", "--root", base, check=False)   # redraw (import)
         if rc:                                       # a map file of yours is left alone: a note, not a failure
             self.say("- map: " + " ".join(l for l in out.splitlines() if "left alone" in l))
@@ -852,6 +891,11 @@ class Mothership:
                 data.pop("permissions", None)
             write_if_changed(f, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
             self.say("- Claude Code: base removed from permissions.additionalDirectories")
+
+    def frugal_hosts_arg(self):
+        """`--hosts auto` when the vendored Frugal-Bridge has its hosts table (kit/hosts.py: every tool it knows,
+        installed ones only); older kits pick their tools themselves."""
+        return ["--hosts", "auto"] if (self.fbk / "kit" / "hosts.py").is_file() else []
 
     def frugal_version(self):
         m = re.search(r'^VERSION *= *"?(\d+)', read(self.fbk / "kit" / "setup.py") or "", re.M)
@@ -962,6 +1006,8 @@ class Mothership:
             self.say(f"note: the base keeps its newer Skeleton Base {keep['release']} (brain.py sha256 "
                      f"{str(keep['brain_sha256'])[:12]}); the vendored {keep['vendored']} was not installed over it "
                      "(--force does)")
+        for line in self.tool_lines(base):
+            self.say(line)
         self.say("checks: " + ("all OK" if not report else f"{len(report)} problem(s)"))
         for r in report:
             self.say("  FAIL " + r)
@@ -971,6 +1017,23 @@ class Mothership:
                  "  then ask any AI tool: \"interview me and fill wiki/me/, one question at a time\"\n"
                  f"  check: python3 {self.payload / 'install.py'} check   uninstall: python3 "
                  f"{self.payload / 'install.py'} uninstall")
+
+    def tool_lines(self, base):
+        """Which AI tools each product set up (from their own records)."""
+        out = []
+        conn = (kits(base).get("base-folder") or {}).get("connect") or {}
+        if conn.get("blocks"):
+            out.append("Skeleton Base connected: " + ", ".join(f"~/{r}" for r in sorted(conn["blocks"]))
+                       + (" (+ MCP server)" if conn.get("mcp") or getattr(self, "connect_extra", None) else ""))
+        reg = frugal_reg()
+        if reg is not None:
+            tools = sorted((reg.get("tools") or {}))
+            if tools:
+                out.append("Frugal-Bridge for: " + ", ".join(tools))
+            nu = reg.get("needs_user") or {}
+            if nu:
+                out.append("Frugal-Bridge needs you for: " + ", ".join(sorted(nu)) + " (see its install output)")
+        return out
 
     # ---- rollback / uninstall
     def rollback(self):
@@ -1308,6 +1371,15 @@ class Mothership:
         if len(w) > limit:
             self.say(f"  ... and {len(w) - limit} more")
 
+    def report(self):
+        """Frugal-Bridge's token-usage report (hooks, plugins and proxy logs of every tool) for the last DAYS."""
+        kit = self.fbk if (self.fbk / "kit" / "setup.py").is_file() else ROOT / "components" / FB
+        setup = kit / "kit" / "setup.py"
+        if "report" not in (read(setup) or ""):
+            raise Fail(f"this Frugal-Bridge ({setup}) has no usage report")
+        cmd = [sys.executable, str(setup), "report"] + ([str(self.a.days)] if self.a.days else [])
+        return subprocess.run(cmd, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1")).returncode
+
     def check(self):
         base = self.resolve_base(False)
         if not (base / STATE).exists():
@@ -1342,6 +1414,8 @@ class Mothership:
         for u in sd.get("units") or []:
             state = "enabled by The Mothership" if u in (sd.get("enabled_by_us") or []) else "written, not enabled by it"
             self.say(f"unit {u}: {state}")
+        for line in self.tool_lines(base):
+            self.say(line)
         self.say(f"user file: {base / 'wiki' / 'me'}/ (one for every tool)")
         return 0
 
@@ -1350,13 +1424,16 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="install.py", description="The Mothership: Skeleton Base + Frugal-Bridge, "
                                 "one install.")
     p.add_argument("command", nargs="?", default="install",
-                   choices=("install", "check", "status", "update", "uninstall"))
+                   choices=("install", "check", "status", "update", "uninstall", "report"))
+    p.add_argument("days", nargs="?", type=int, help="report: how many days back (default: Frugal-Bridge's)")
     p.add_argument("--base", help=f"the knowledge base folder (default {DEFAULT_BASE}, or the one already connected)")
     p.add_argument("--yes", "-y", action="store_true", help="no questions; run systemctl --user when available")
     p.add_argument("--no-frugal", action="store_true", help="only Skeleton Base")
     p.add_argument("--watch", dest="watch", action="store_true", default=None, help="watcher service (default on Linux)")
     p.add_argument("--no-watch", dest="watch", action="store_false")
     p.add_argument("--timer", action="store_true", help="daily collect timer (also comes with --watch)")
+    p.add_argument("--mcp", action="store_true", help="also register the base's MCP server (brain.py mcp) in each "
+                   "tool's MCP config (Skeleton Base connect --mcp; kept for later runs)")
     p.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
     p.add_argument("--force", action="store_true", help="install the vendored Skeleton Base even over a newer one")
     p.add_argument("--keep-backups", action="store_true",
@@ -1384,6 +1461,8 @@ def main(argv=None):
             return m.uninstall()
         if a.command == "check":
             return m.check()
+        if a.command == "report":
+            return m.report()
         return m.status()
     except Fail as ex:
         print(f"ERROR: {ex}", file=sys.stderr)

@@ -185,7 +185,13 @@ def _fake_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     for e in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME", "FRUGAL_HOME"):
         monkeypatch.delenv(e, raising=False)
-    monkeypatch.setattr(S.shutil, "which", lambda b: None)
+    # a tool counts as installed by its binary: these tests make a tool "present" by creating its folder
+    present = {"claude": ".claude", "codex": ".codex", "hermes": ".hermes", "gemini": ".gemini"}
+    def which(b):
+        if b == "hermes" and os.environ.get("HERMES_HOME") and os.path.isdir(os.environ["HERMES_HOME"]):
+            return "/fake/bin/hermes"
+        return f"/fake/bin/{b}" if b in present and (home / present[b]).is_dir() else None
+    monkeypatch.setattr(S.shutil, "which", which)
     return home
 
 
@@ -300,7 +306,8 @@ def test_global_custom_frugal_home_no_duplicate_hooks(tmp_path, monkeypatch):
     assert S.main(["setup.py", "install", "--global"]) == 0
     assert st.read_bytes() == first                                          # byte-identical re-run
     h = _hooks_by_event(st)
-    assert h["SessionStart"] == ["echo mine", f'python3 "{tmp_path}/my-fb-folder/frugal_hook.py" {S.HOOK_TAG}']
+    assert h["SessionStart"] == ["echo mine",
+                                 f'python3 "{tmp_path}/my-fb-folder/frugal_hook.py" --tool claude-code --event start {S.HOOK_TAG}']
     assert len(h["UserPromptSubmit"]) == 1
     assert S.main(["setup.py", "uninstall", "--global"]) == 0
     assert json.loads(st.read_text()) == {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}}
@@ -474,6 +481,31 @@ def test_global_uninstall_after_base_disconnect_leaves_nothing(tmp_path, monkeyp
     assert not (home / ".claude" / "skills").exists()                   # empty folders we made -> removed
     assert not (home / ".codex" / "skills").exists()
     assert not (home / ".hermes" / "plugins").exists() and not (home / ".hermes" / "skills").exists()
+    now = {p: p.read_bytes() for p in home.rglob("*") if p.is_file() and ".frugal-bridge" not in str(p)}
+    assert now == pristine
+
+
+def test_global_rerun_after_base_disconnect_never_brings_base_entries_back(tmp_path, monkeypatch):
+    """A re-run after another kit changed a settings file (a base connected, Frugal installed, the base
+    disconnected, Frugal re-run): uninstall must not put back the text from before the other kit's change (the
+    base's hooks and folder entry would come back from the dead)."""
+    home = _fake_home(tmp_path, monkeypatch)
+    b = _bare_base(tmp_path / "kb")
+    (home / ".claude").mkdir()
+    (home / ".claude" / "CLAUDE.md").write_text("my rules\n")
+    sj = home / ".claude" / "settings.json"
+    pristine = {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
+    base_part = {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": f"python3 {b}/tools/brain.py collect"}]}]},
+                 "permissions": {"additionalDirectories": [str(b)]}}
+    sj.write_text(json.dumps(base_part, indent=2) + "\n")                  # 1. the base connects
+    assert S.main(["setup.py", "install", "--global", "--hosts", "claude-code"]) == 0      # 2. Frugal
+    st = json.loads(sj.read_text())                                         # 3. the base disconnects
+    del st["hooks"]["SessionEnd"]; del st["permissions"]
+    sj.write_text(json.dumps(st, indent=2) + "\n")
+    assert S.main(["setup.py", "install", "--global", "--hosts", "claude-code"]) == 0      # 4. Frugal re-run
+    assert S.main(["setup.py", "uninstall", "--global"]) == 0                              # 5. Frugal leaves
+    assert "brain.py" not in (sj.read_text() if sj.exists() else ""), sj.read_text()
+    assert str(b) not in (sj.read_text() if sj.exists() else "")
     now = {p: p.read_bytes() for p in home.rglob("*") if p.is_file() and ".frugal-bridge" not in str(p)}
     assert now == pristine
 

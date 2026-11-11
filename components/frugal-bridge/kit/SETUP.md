@@ -19,6 +19,9 @@ agent in `USER.md`.
    Tools with a delegation-backend plugin (e.g. Hermes) also get `frugal-tiers` (a cheap/mid/top model per helper);
    setup prints the two commands that turn it on and the undo.
    Force a choice with `--hosts <list>` (`none` = rules only).
+   `--global` covers every live agent tool in `kit/hosts.py` (rules file, hooks / plugin, helper subagents with the
+   tier's model and effort, usage log; matrix with what is impossible per tool: `adapter/README.md`). Token usage:
+   `python3 kit/setup.py report [days]`.
 5. Checks: one block, pointers import `AGENTS.md`, start files exist, whole `AGENTS.md` under 32 KiB (some tools read
    only the first 32 KiB).
 

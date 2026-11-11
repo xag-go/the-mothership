@@ -3,9 +3,10 @@
 (docs/COEXISTENCE.md): marked blocks only, `.kits.json` registry, slots owned by a base folder when
 present, key-level JSON merge for host settings, idempotent, reversible, backups of every touched file.
 
-  python3 setup.py install   --global [--hosts auto|claude-code,codex,gemini,opencode,hermes] [--base DIR]   (every project)
+  python3 setup.py install   --global [--hosts auto|<tool>,<tool>...] [--base DIR]   (tools: kit/hosts.py)   (every project)
   python3 setup.py uninstall --global
   python3 setup.py check     --global
+  python3 setup.py report    [days]      (token usage of every tool Frugal logs: hooks, plugins, proxy)
   python3 setup.py install   <dir> [--hosts auto|claude-code,gemini,hermes,none] [--hermes-home PATH]   (one folder)
   python3 setup.py uninstall <dir>
   python3 setup.py check     <dir>
@@ -30,6 +31,8 @@ import sys
 
 KIT = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(KIT)
+sys.path.insert(0, KIT)
+import hosts as HOSTS  # noqa: E402  (kit/hosts.py: the table of agent tools)
 VERSION = "6"
 START, END = "<!-- frugal-bridge:start v{v} -->", "<!-- frugal-bridge:end -->"
 START_RE = re.compile(r"<!-- frugal-bridge:start v[^>]*-->")
@@ -675,7 +678,8 @@ live in the current project folder; create one only when you have something to p
 
 
 class GlobalSetup(Setup):
-    """User-level install: one marked block per tool's own instruction file (any folder, any session)."""
+    """User-level install: one marked block per tool's own rules file (any folder, any session), plus each tool's
+    strongest enforcement (hooks / plugin / proxy hint) and its helper tiers (model + effort). Table: kit/hosts.py."""
 
     def __init__(self):
         super().__init__(frugal_home())
@@ -721,19 +725,200 @@ class GlobalSetup(Setup):
         return "restore" if (not orig.strip() or orig.strip() == "{}") else "remove"
 
     def reg(self):
-        return json.loads(read(self.reg_path()) or "{}")
+        try:
+            return json.loads(read(self.reg_path()) or "{}")
+        except json.JSONDecodeError:
+            raise SystemExit(f"{self.reg_path()} is not valid JSON; fix it by hand first (nothing changed).")
 
     def detect(self):
-        return [t for t, (home, _, b) in global_targets().items() if shutil.which(b) or os.path.isdir(home)]
+        return [t for t in HOSTS.H if HOSTS.installed(t)]
 
+    # ------------------------------------------------------------ rules targets
+    def rules_target(self, t):
+        """The rules file for tool t: the base's file when it holds a base block, else the tool's own file
+        (Codex: AGENTS.override.md when present, since it hides AGENTS.md). None = no rules file (hook/rules copy)."""
+        h = HOSTS.H[t]
+        if h.get("rules") in (None, "aider-read"):
+            return None
+        for bf in h.get("base_files") or []:
+            f = HOSTS.expand(t, bf)
+            if "<!-- base-folder:start" in (read(f) or ""):
+                return f
+        ov = h.get("override")
+        if ov and (read(HOSTS.expand(t, ov)) or "").strip():
+            return HOSTS.expand(t, ov)
+        return HOSTS.expand(t, h["rules"])
+
+    def plan_rules(self, sel):
+        """{tool: file} and {tool: (other tool, file)} for tools that already load another selected tool's file."""
+        files = {t: self.rules_target(t) for t in sel}
+        via = {}
+        for t in sel:
+            reads = [HOSTS.expand(t, x) for x in HOSTS.H[t].get("reads") or []]
+            for u in sel:
+                if u != t and u not in via and files.get(u) and files[u] in reads and not HOSTS.H[u].get("policy"):
+                    via[t] = (u, files[u])
+                    break
+        return files, via
+
+    # ------------------------------------------------------------ owned files and config edits (ledger)
+    def own_file(self, t, path, text, mode=None):
+        """Write a file Frugal owns entirely. A file there that is not ours is left alone (returns False)."""
+        ed = self.r.setdefault("edits", {})
+        cur = read(path)
+        rec = ed.get(path)
+        if cur is not None and cur != text and not (rec and rec.get("fmt") == "file" and sha(cur) == rec.get("sha")):
+            self.log.append(f"{t}: {path} exists and is not Frugal's: left alone")
+            return False
+        self.remember_dirs(path)
+        if cur != text:
+            self.backup(path) if cur is not None else None
+            write(path, text)
+        if mode:
+            os.chmod(path, mode)
+        ed[path] = {"fmt": "file", "tool": t, "sha": sha(text), "created": rec["created"] if rec else cur is None}
+        self.note_written(path)
+        return True
+
+    def cfg_edit(self, t, fmt, path, hooks=None, changes=(), lines=()):
+        """Merge Frugal's part into a config file of another format, recording the text from before (first install)
+        and a hash of the text after, so uninstall gives the exact bytes back when nothing else changed."""
+        ed = self.r.setdefault("edits", {})
+        rec = ed.get(path) or {}
+        cur = read(path)
+        if fmt == "lines" and cur is None and HOSTS.H[t].get("hooks") == "crush" and \
+                os.path.exists(HOSTS.expand(t, "@root/crush.json")):
+            self.log.append(f"{t}: only the old crush.json is there; not creating crushrc (add the hook by hand)")
+            return False
+        # the text from before = as it is now, on the first run of this ledger (an older install's snapshot would
+        # drop what others added since, e.g. a base's permissions: never restore from it)
+        orig = rec["orig"] if "orig" in rec else cur
+        # the file changed since our last write (another kit or the user): the recorded text from before is out of
+        # date (e.g. it still holds a base's hooks that its disconnect removed since). Uninstall must then remove
+        # only our entries, never put that old text back.
+        orig_stale = bool(rec.get("orig_stale")) or ("orig" in rec and rec.get("after") is not None
+                                                     and (cur is None or sha(cur) != rec["after"]))
+        notes, made = [], list(rec.get("made") or [])
+        if fmt in ("json", "jsonc") and changes:   # record only keys Frugal adds (a value the user had stays theirs)
+            try:
+                data = json.loads(HOSTS.strip_jsonc(cur)) if cur and cur.strip() else {}
+            except ValueError:
+                data = {}
+            before = [tuple([c[0], tuple(c[1]), c[2]]) for c in rec.get("changes") or []]
+            def ours(c):
+                if c in before:
+                    return True
+                v = HOSTS._get(data, c[1]) if isinstance(data, dict) else None
+                return v is None if c[0] == "set" else not (isinstance(v, list) and c[2] in v)
+            for c in changes:
+                v = HOSTS._get(data, tuple(c[1])) if isinstance(data, dict) else None
+                if not ours(tuple([c[0], tuple(c[1]), c[2]])) and c[0] == "set" and v != c[2]:
+                    notes.append(f"{'.'.join(c[1])} already set by you: left as is")
+            changes = [c for c in changes if ours(tuple([c[0], tuple(c[1]), c[2]]))]
+        if fmt in ("json", "jsonc"):
+            new, notes, m2 = HOSTS.json_apply(cur, hooks or {}, list(changes))
+            if new is None:
+                self.log.append(f"{t}: {path}: " + "; ".join(notes)); return False
+            made += [m for m in m2 if m not in made]
+        elif fmt == "lines":
+            new = HOSTS.lines_apply(cur, list(lines))
+        elif fmt == "toml":
+            new, notes = HOSTS.toml_apply(cur, [(a, b, v) for _, (a, b), v in changes])
+        elif fmt == "yaml-list":
+            new, notes = cur, []
+            for key, item in lines:
+                n2, nn = HOSTS.yaml_list_apply(new, key, item)
+                notes += nn
+                new = n2 if n2 is not None else new
+        else:
+            raise ValueError(fmt)
+        for n in notes:
+            self.log.append(f"{t}: {path}: {n}")
+        if new is None or (new == (cur or "") and cur is None):
+            return False
+        self.remember_dirs(path)
+        if new != cur:
+            self.backup(path) if cur is not None else None
+            write(path, new)
+        ed[path] = {"fmt": fmt, "tool": t, "orig": orig, "after": sha(new), "hooks": hooks or {},
+                    "changes": [list(c) for c in changes], "made": made}
+        if orig_stale:
+            ed[path]["orig_stale"] = True
+        return True
+
+    def undo_edit(self, path, rec):
+        cur = read(path)
+        if cur is None:
+            return
+        orig = rec.get("orig")
+        if rec["fmt"] == "file":
+            if sha(cur) == rec.get("sha"):
+                os.remove(path); self.log.append(f"removed {path}")
+            else:
+                self.log.append(f"kept {path} (you changed it)")
+            return
+        stale = rec["fmt"] in ("json", "jsonc") and orig and rec.get("hooks") and \
+            (HOOK_TAG in orig or HOOK_FILE in orig)    # the text from before had an older Frugal's hooks
+        stale = stale or bool(rec.get("orig_stale"))    # changed by someone else between two of our runs
+        if sha(cur) == rec.get("after") and not stale:
+            new = orig                                 # nothing else touched it: the exact bytes from before
+        elif rec["fmt"] in ("json", "jsonc"):
+            ch = [tuple([c[0], tuple(c[1]), c[2]]) for c in rec.get("changes") or []]
+            data = HOSTS.json_remove(cur, rec.get("hooks"), ch, rec.get("made") or [])
+            if data is None:
+                self.log.append(f"{path} is not valid JSON now: Frugal's entries left for you to remove"); return
+            try:
+                od = json.loads(HOSTS.strip_jsonc(orig)) if orig and orig.strip() else ({} if orig is not None else None)
+            except ValueError:
+                od = None
+            if rec.get("orig_stale") and od:
+                od = None                              # out-of-date text: never compared, never put back
+            if od is not None and data == od:
+                new = orig
+            elif data == {}:   # empty now: the user's own empty file back, else (another kit's content gone) remove
+                new = orig if orig is not None and orig.strip() in ("", "{}") else None
+            elif HOSTS.has_comments(cur):
+                self.log.append(f"{path} has comments and was changed since: remove Frugal's entries by hand"); return
+            else:
+                new = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+        else:
+            new = HOSTS.lines_remove(cur)
+            if orig is not None and new.strip() == orig.strip():
+                new = orig
+            elif orig is None and not new.strip():
+                new = None
+        self.backup(path)
+        if new is None:
+            os.remove(path); self.log.append(f"removed {path} (only Frugal's part was in it)")
+        elif new != cur:
+            write(path, new)
+
+    # ------------------------------------------------------------ install
     def install(self, hosts=None, hermes_home=None):
         os.makedirs(self.d, exist_ok=True)
         r = self.r = self.reg()
         tools = r.setdefault("tools", {})
-        targets = global_targets()
-        hosts = [h for h in (hosts or self.detect()) if h in targets]
+        table = HOSTS.load_tiers(KIT)
+        if hosts:
+            for h in hosts:
+                if h not in HOSTS.H:
+                    self.log.append(f"unknown tool {h!r} (known: {', '.join(HOSTS.H)})")
+            asked = [h for h in hosts if h in HOSTS.H]
+        else:
+            asked = self.detect()
+        sel = [t for t in asked if HOSTS.installed(t)]
+        for t in asked:
+            if t not in sel:
+                self.log.append(f"skipped {t}: not installed (no {' / '.join(HOSTS.H[t]['bins'])} on PATH and none of "
+                                f"{', '.join(HOSTS.expand(t, x) for x in HOSTS.H[t].get('proof') or []) or 'its own config files'})")
+        kept_only = set()      # installed earlier, tool not found now: keep its rules block current, add nothing
+        for t in list(tools) + list((r.get("copied") or {})):
+            if t in HOSTS.H and t not in sel:
+                sel.append(t); kept_only.add(t)
+                self.log.append(f"kept current: {t} (installed earlier; tool not found now, so only its rules block "
+                                f"is refreshed — nothing new added)")
         user = os.path.join(self.d, "USER.md")
-        base = find_base([os.path.join(targets[t][0], targets[t][1]) for t in targets], os.path.expanduser("~"),
+        base = find_base(HOSTS.rules_candidates(), os.path.expanduser("~"),
                          (getattr(self, "base_arg", None), os.environ.get("FRUGAL_BASE"), r.get("base")))
         rules = open(os.path.join(KIT, "AGENTS.md")).read() + "\n\n" + open(os.path.join(KIT, "ROUTING.md")).read() + "\n"
         if base:  # coexistence contract: the base owns the slots, Frugal never makes a second copy
@@ -749,41 +934,159 @@ class GlobalSetup(Setup):
                 write(user, open(os.path.join(KIT, "templates", "USER.md")).read()); self.log.append(f"created {user}")
             body = rules + GLOBAL_NOTE.format(user=user)
         r.pop("needs_user", None)
-        for t in hosts:
-            home, fname, _ = targets[t]
-            f = os.path.join(home, fname)
-            prev = tools.get(t, {})
-            if t == "hermes" and not os.path.exists(f):
-                tools.pop(t, None)
-                # Creating SOUL.md would replace the tool's default identity: only add to an existing one.
-                r.setdefault("needs_user", {})[t] = f
-                self.pending_block = self.core(body)
-                self.copy_skills(os.path.join(home, "skills", "frugal-bridge"))
-                dst = self.copy_plugins(home, remember=True)
-                r.setdefault("copied", {})[t] = {"home": home, "plugin": dst}
-                self.note_backend(r, home)
+        files, via = self.plan_rules(sel)
+        old_tiers = dict(r.get("tiers") or {})
+        tiers_out = r["tiers"] = {}
+        hook = os.path.join(self.d, HOOK_FILE)
+        need_hook = any(HOSTS.H[t].get("hooks") not in (None, "hermes-plugin") for t in sel)
+        if need_hook or "claude-code" in sel:
+            new = open(os.path.join(ROOT, "adapter", "hooks", "frugal_hook.py")).read()
+            if read(hook) != new:
+                write(hook, new); os.chmod(hook, 0o755)
+        # 1. helper tiers first (the rules paragraph names the values written)
+        tier_txt, pending = {}, {}
+        for t in sel:
+            if t in kept_only:
+                prev_rows = (old_tiers.get(t) or {}).get("rows") or []
+                if old_tiers.get(t):
+                    tiers_out[t] = old_tiers[t]
+                tier_txt[t] = HOSTS.tier_rules(t, table, prev_rows)
                 continue
-            self._modes = {f: prev.get("mode")} if prev.get("mode") else {}
+            fs, changes, rows, note = HOSTS.tier_files(t, table)
+            for f, text in fs.items():
+                self.own_file(t, f, text)
+            for c in changes:
+                if c[0] == "toml":
+                    pending.setdefault((t, "toml", HOSTS.expand(t, "@root/config.toml")), [None, []])[1].append(c)
+                else:
+                    cfgp = {"gemini": "@root/settings.json", "copilot": "@root/settings.json",
+                            "qwen": "@root/settings.json"}[t]
+                    fmt = "json" if t == "copilot" else "jsonc"
+                    pending.setdefault((t, fmt, HOSTS.expand(t, cfgp)), [None, []])[1].append(c)
+            tiers_out[t] = {"rows": rows, "note": note}
+            if note:
+                self.log.append(f"{t} tiers: {note}")
+            tier_txt[t] = HOSTS.tier_rules(t, table, rows)
+        # 2. hooks / plugins
+        native = [t for t in (r.get("native_hooks") or []) if t in kept_only]
+        for t in sel:
+            if t in kept_only:
+                continue
+            spec = HOSTS.hook_spec(t, hook, "claude-code" in sel)
+            if spec is None:
+                pj = HOSTS.plugin_js(t, ROOT, hook, self.d)
+                if pj:
+                    self.own_file(t, pj[0], pj[1]) and native.append(t)
+                continue
+            if spec[0] == "via":
+                self.log.append(f"{t}: hooks come from {spec[1]} (it runs ~/.claude/settings.json hooks)")
+                continue
+            if spec[0] == "file":
+                if t == "cline" and any(os.path.splitext(x)[0].lower() == "taskstart" and os.path.join(
+                        os.path.dirname(spec[1]), x) != spec[1] for x in (os.listdir(os.path.dirname(spec[1]))
+                                                                         if os.path.isdir(os.path.dirname(spec[1])) else [])):
+                    self.log.append(f"{t}: a TaskStart hook of yours exists (one file per event): not added")
+                    continue
+                if self.own_file(t, spec[1], spec[2], 0o755 if t == "cline" else None):
+                    native.append(t)
+                continue
+            fmt, path, hk, sets = spec
+            key = (t, fmt, path)
+            pending.setdefault(key, [None, []])
+            pending[key][0] = hk if fmt != "lines" else None
+            pending[key][1] += [("set",) + tuple(x) for x in sets] if fmt != "lines" else []
+            if fmt == "lines":
+                pending[key].append(hk)
+            native.append(t)
+        for (t, fmt, path), v in pending.items():
+            if fmt == "lines":
+                self.cfg_edit(t, "lines", path, lines=v[2])
+            elif fmt == "toml":
+                self.cfg_edit(t, "toml", path, changes=v[1])
+            else:
+                self.cfg_edit(t, fmt, path, hooks=v[0], changes=v[1])
+        r["native_hooks"] = sorted(set(native))
+        # 3. rules blocks
+        done_files = {}
+        for t in sel:
+            h = HOSTS.H[t]
+            prev = tools.get(t, {})
+            full = body + "\n" + tier_txt.get(t, "") + "\n"
+            if t in via:
+                tools[t] = {"via": via[t][0], "file": via[t][1]}
+                continue
+            if h.get("rules") is None or h.get("rules") == "aider-read":
+                rp = os.path.join(self.d, "RULES.md")
+                write(rp, self.core(full) + "\n")
+                if h.get("rules") == "aider-read":
+                    self.cfg_edit(t, "yaml-list", os.path.expanduser("~/.aider.conf.yml"), lines=[("read", rp)])
+                tools[t] = {"rules_copy": rp}
+                continue
+            f = files[t]
+            if f in done_files:
+                tools[t] = {"same_as": done_files[f], "file": f}
+                continue
+            if h.get("policy") == "existing" and not os.path.exists(f):
+                tools.pop(t, None)
+                # Creating it would replace the tool's default identity / seed: only add to an existing one.
+                r.setdefault("needs_user", {})[t] = f
+                self.pending_block = self.core(full)
+                if t == "hermes":
+                    self.copy_skills_for(t, r)
+                    dst = self.copy_plugins(HOSTS.root(t), remember=True)
+                    r.setdefault("copied", {})[t] = {"home": HOSTS.root(t), "plugin": dst}
+                    self.note_backend(r, HOSTS.root(t))
+                continue
+            self._modes = {f: prev.get("mode")} if prev.get("mode") and prev.get("file") == f else {}
+            cur = read(f) or ""
+            m_ = START_RE.search(cur)
+            if m_ and "<!-- base-folder:start" in cur[m_.end():]:      # a base came later, below us: move after it
+                stripped, _ = self.strip_block(cur, self._modes.get(f))
+                self.change(f, stripped)
+                self._modes = {}
+                prev = {**prev, "mode": None}
             existed = os.path.exists(f)
             self.remember(f)
-            mode = self.put_block(f, body, after_base=True)
+            mode = self.put_block(f, full, after_base=True)
             bsh = list(prev.get("block_sha") or [])
-            h = self.block_sha_of(f)
-            if h and h not in bsh:
-                bsh.append(h)
-            tools[t] = {"file": f, "mode": mode, "created": prev.get("created", not existed), "block_sha": bsh}
-            if t == "claude-code":
-                self.global_claude(home)
-            if t in ("claude-code", "codex"):
-                self.copy_skills(os.path.join(home, "skills"))
+            hh = self.block_sha_of(f)
+            if hh and hh not in bsh:
+                bsh.append(hh)
+            tools[t] = {"file": f, "mode": mode, "created": prev.get("created", not existed) if prev.get("file") == f
+                        else not existed, "block_sha": bsh}
+            if prev.get("file") and prev["file"] != f:
+                self.log.append(f"{t}: the rules moved to {f}; the old block in {prev['file']} is left (uninstall it first to move cleanly)")
+            done_files[f] = t
             if t == "hermes":
-                self.copy_skills(os.path.join(home, "skills", "frugal-bridge"))
-                tools[t]["plugin"] = self.copy_plugins(home, remember=True)
-                self.note_backend(r, home)
+                tools[t]["plugin"] = self.copy_plugins(HOSTS.root(t), remember=True)
+                self.note_backend(r, HOSTS.root(t))
+        for t in sel:
+            if (t in tools or t in (r.get("copied") or {})) and t not in kept_only:
+                self.copy_skills_for(t, r)
         r["version"] = VERSION
         r["written"] = {**(r.get("written") or {}), **(getattr(self, "written", None) or {})}
         write(self.reg_path(), json.dumps(r, indent=2) + "\n")
         return self.check(), self.log
+
+    def copy_skills_for(self, t, r):
+        """Skills once per folder: the shared ~/.agents/skills for every tool that reads it, else the tool's own."""
+        s = HOSTS.H[t].get("skills")
+        if not s:
+            return
+        if t == "hermes":
+            ext = HOSTS._read(os.path.join(HOSTS.root(t), "config.yaml")) or ""
+            dirs = _yaml_key(ext, "skills", "external_dirs") or []
+            if any(os.path.expanduser(x).rstrip("/") == os.path.expanduser(HOSTS.SHARED_SKILLS) for x in dirs):
+                s = "shared"
+        d = os.path.expanduser(HOSTS.SHARED_SKILLS) if s == "shared" else HOSTS.expand(t, s)
+        sd = r.setdefault("skills_dirs", [])
+        if d not in sd:
+            sd.append(d)
+        self.copy_skills(d)
+        if t == "codex":       # older versions copied them to ~/.codex/skills: Codex reads ~/.agents/skills
+            old = os.path.join(HOSTS.root(t), "skills")
+            for sk in os.listdir(os.path.join(KIT, "skills")):
+                self.remove_copy(os.path.join(old, sk), os.path.join(KIT, "skills", sk), r.get("written") or {})
 
     @staticmethod
     def note_backend(r, home):
@@ -803,21 +1106,6 @@ class GlobalSetup(Setup):
                 write(f, body)
             self.note_written(f)
 
-    def global_claude(self, home):
-        dst = os.path.join(self.d, "frugal_hook.py")
-        new = open(os.path.join(ROOT, "adapter", "hooks", "frugal_hook.py")).read()
-        if read(dst) != new:
-            write(dst, new); os.chmod(dst, 0o755)
-        f = os.path.join(home, "settings.json")
-        t = read(f)
-        try:
-            data = json.loads(t) if t and t.strip() else {}
-        except json.JSONDecodeError:
-            raise SystemExit(f"{f} is not valid JSON; fix it by hand first (nothing changed there).")
-        self.remember(f)
-        self.merge_hooks(data, ("SessionStart", "UserPromptSubmit"), dst)
-        self.change(f, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-
     def drop_or_restore(self, f, new, empty_now):
         orig = self.r.get("orig", {})
         o = orig.get(f)
@@ -834,50 +1122,56 @@ class GlobalSetup(Setup):
         else:
             self.change(f, new)
 
+    # ------------------------------------------------------------ uninstall
     def uninstall(self):
         r = self.r = self.reg()
-        targets = global_targets()
         written, kept = r.get("written") or {}, []
+        edits = r.get("edits") or {}
+        for path in reversed(list(edits)):
+            self.undo_edit(path, edits[path])
+        legacy_claude = os.path.join(HOSTS.root("claude-code"), "settings.json")
+        if "claude-code" in (r.get("tools") or {}) and legacy_claude not in edits:   # installs before the ledger
+            st = read(legacy_claude)
+            if st:
+                data = json.loads(st)
+                self.drop_hooks(data)
+                self.drop_or_restore(legacy_claude, json.dumps(data, indent=2, ensure_ascii=False) + "\n", data == {})
         for t, info in (r.get("tools") or {}).items():
-            f = info["file"]
-            txt = read(f)
-            if txt is not None:
-                saved = self.keep_edited_block(f, txt, info.get("block_sha"), os.path.join(self.d, "kept"))
-                if saved:
-                    self.log.append(f"you had edited the Frugal-Bridge block in {f}: saved to {saved}")
-                new, had = self.strip_block(txt, info.get("mode"))
-                if had:
-                    self.drop_or_restore(f, new, not new.strip())
-            home = targets[t][0] if t in targets else os.path.dirname(f)
-            skills = os.path.join(home, "skills", "frugal-bridge") if t == "hermes" else os.path.join(home, "skills")
-            for sk in os.listdir(os.path.join(KIT, "skills")):
-                kept += self.remove_copy(os.path.join(skills, sk), os.path.join(KIT, "skills", sk), written)
+            f = info.get("file")
+            if f and not info.get("via") and not info.get("same_as"):
+                txt = read(f)
+                if txt is not None:
+                    saved = self.keep_edited_block(f, txt, info.get("block_sha"), os.path.join(self.d, "kept"))
+                    if saved:
+                        self.log.append(f"you had edited the Frugal-Bridge block in {f}: saved to {saved}")
+                    new, had = self.strip_block(txt, info.get("mode"))
+                    if had:
+                        self.drop_or_restore(f, new, not new.strip())
             if t == "hermes":
-                d_ = os.path.join(home, "skills", "frugal-bridge")
-                if os.path.isdir(d_) and not os.listdir(d_):
-                    os.rmdir(d_)
+                home = HOSTS.root(t) if not info.get("plugin") else os.path.dirname(os.path.dirname(info["plugin"]))
                 kept += self.remove_plugins(info.get("plugin") or os.path.join(home, "plugins", "frugal-bridge"), written)
                 self.log.append("plugin files removed; if you enabled it, also run its disable command")
                 self.restore_backend(home, (r.get("hermes_backend_prev") or {}).get(home))
-            if t == "claude-code":
-                sf = os.path.join(home, "settings.json")
-                st = read(sf)
-                if st:
-                    data = json.loads(st)
-                    self.drop_hooks(data)
-                    self.drop_or_restore(sf, json.dumps(data, indent=2, ensure_ascii=False) + "\n", data == {})
-        for t, info in (r.get("copied") or {}).items():
+        dirs = list(r.get("skills_dirs") or [])
+        for t in list(r.get("tools") or {}) + list(r.get("copied") or {}):   # where older versions put them
+            if t == "hermes":
+                h = (r.get("copied") or {}).get(t, {}).get("home") or HOSTS.root(t)
+                dirs.append(os.path.join(h, "skills", "frugal-bridge"))
+            elif t in ("claude-code", "codex"):
+                dirs.append(os.path.join(HOSTS.root(t), "skills"))
+        for d in dict.fromkeys(dirs):
             for sk in os.listdir(os.path.join(KIT, "skills")):
-                kept += self.remove_copy(os.path.join(info["home"], "skills", "frugal-bridge", sk),
-                                         os.path.join(KIT, "skills", sk), written)
-            d_ = os.path.join(info["home"], "skills", "frugal-bridge")
-            if os.path.isdir(d_) and not os.listdir(d_):
-                os.rmdir(d_)
+                kept += self.remove_copy(os.path.join(d, sk), os.path.join(KIT, "skills", sk), written)
+            if d.endswith(os.path.join("skills", "frugal-bridge")) and os.path.isdir(d) and not os.listdir(d):
+                os.rmdir(d)
+        for t, info in (r.get("copied") or {}).items():
             kept += self.remove_plugins(info["plugin"], written)
             self.restore_backend(info["home"], (r.get("hermes_backend_prev") or {}).get(info["home"]))
-        for f in ("frugal_hook.py", "global.json"):
+        for f in ("frugal_hook.py", "RULES.md", "hook-state.json", "global.json"):
             if os.path.exists(os.path.join(self.d, f)):
                 os.remove(os.path.join(self.d, f))
+        if os.path.isdir(os.path.join(self.d, "once")):
+            shutil.rmtree(os.path.join(self.d, "once"), ignore_errors=True)
         for d in sorted(r.get("made_dirs", []), key=len, reverse=True):   # folders we made, only if now empty
             if os.path.isdir(d) and not os.listdir(d):
                 os.rmdir(d)
@@ -898,11 +1192,12 @@ class GlobalSetup(Setup):
 
     def check(self):
         out, ok = [], True
-        tools = (self.reg().get("tools") or {})
-        for t, f in (self.reg().get("needs_user") or {}).items():
+        r = self.reg()
+        tools = r.get("tools") or {}
+        for t, f in (r.get("needs_user") or {}).items():
             out.append(f"{t}: needs user — {f} does not exist; not created (it would replace the default identity)")
-        if not tools and self.reg().get("needs_user"):
-            for t, info in (self.reg().get("copied") or {}).items():
+        if not tools and r.get("needs_user"):
+            for t, info in (r.get("copied") or {}).items():
                 if t == "hermes" and info.get("plugin"):
                     out.append(self.tiers_status(info["home"]))
             out.insert(0, "OK")
@@ -910,15 +1205,44 @@ class GlobalSetup(Setup):
         if not tools:
             return "PROBLEMS\nnot installed for any tool (no agent tool found? use --hosts)"
         for t, info in tools.items():
+            if info.get("via"):
+                txt = read(info["file"]) or ""
+                n = len(START_RE.findall(txt))
+                out.append(f"{t}: loads the block from {info['file']} ({info['via']}) block={n}"); ok &= n == 1
+                continue
+            if info.get("rules_copy"):
+                ex = os.path.isfile(info["rules_copy"])
+                out.append(f"{t}: rules from {info['rules_copy']} ({'hook / read: list' if ex else 'MISSING'})"); ok &= ex
+                continue
             txt = read(info["file"]) or ""
             n = len(START_RE.findall(txt)); b = len(txt.encode())
+            if info.get("same_as"):
+                out.append(f"{t}: same file as {info['same_as']} ({info['file']}) block={n}"); ok &= n == 1
+                continue
             out.append(f"{t}: {info['file']} block={n} size={b}"); ok &= n == 1
-            if b > CODEX_LIMIT:
-                out.append(f"  {info['file']} over 32 KiB: some tools read only the first 32 KiB"); ok = False
-        for t, info in list(tools.items()) + list((self.reg().get("copied") or {}).items()):
+            cap = (HOSTS.H.get(t) or {}).get("cap")
+            if cap:
+                size = b if cap[0] == "bytes" else len(txt)
+                if size > cap[1]:
+                    out.append(f"  over {cap[1]} {cap[0]} ({cap[2]}): {t} drops the rest; shorten it"); ok = False
+                elif t == "codex" and size > SOFT_LIMIT:
+                    out.append(f"  close to the 32 KiB limit (counts with the project AGENTS.md)")
+            if "<!-- base-folder:start" in txt and START_RE.search(txt) and \
+                    txt.find("<!-- base-folder:start") > START_RE.search(txt).start():
+                out.append(f"  order: frugal block before the base block (should be after)"); ok = False
+        for t, info in list(tools.items()) + list((r.get("copied") or {}).items()):
             if t == "hermes" and info.get("plugin"):
                 out.append(self.tiers_status(os.path.dirname(os.path.dirname(info["plugin"]))))
-        base = self.reg().get("base")
+        hooks = r.get("native_hooks") or []
+        if hooks:
+            out.append("hooks/plugins: " + ", ".join(hooks))
+        for t, ti in (r.get("tiers") or {}).items():
+            if ti.get("rows"):
+                out.append(f"{t} tiers: " + ", ".join(f"{n}={m}" + (f"/{e}" if e else "") for n, m, e, _ in ti["rows"]))
+        for path, rec in (r.get("edits") or {}).items():
+            if rec.get("fmt") == "file" and not os.path.exists(path):
+                out.append(f"  missing: {path} (re-run install --global)"); ok = False
+        base = r.get("base")
         if base:
             if not os.path.isdir(base):
                 out.append(f"knowledge base {base} is gone: re-run install --global"); ok = False
@@ -928,6 +1252,86 @@ class GlobalSetup(Setup):
             out.append("USER.md missing"); ok = False
         out.insert(0, "OK" if ok else "PROBLEMS")
         return "\n".join(out)
+
+
+def usage_files():
+    """Every usage.jsonl Frugal writes: hooks/plugins ($FRUGAL_HOME), the Hermes plugin (each profile), the proxy."""
+    fs = [(os.path.join(frugal_home(), "usage.jsonl"), None)]
+    hh = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    fs.append((os.path.join(hh, "frugal-bridge", "usage.jsonl"), "hermes"))
+    prof = os.path.join(hh, "profiles")
+    for p in sorted(os.listdir(prof)) if os.path.isdir(prof) else []:
+        fs.append((os.path.join(prof, p, "frugal-bridge", "usage.jsonl"), f"hermes:{p}"))
+    fs.append((os.path.expanduser("~/.local/share/frugal-bridge/proxy/usage.jsonl"), "proxy"))
+    return fs
+
+
+PRICE = {"opus": (5, 25, 0.5, 6.25), "sonnet": (3, 15, 0.3, 3.75), "haiku": (1, 5, 0.1, 1.25)}
+
+
+def report(days=7, now=None):
+    """One table over every tool: calls, tokens, ~cost at API list prices, biggest context, alerts."""
+    import time
+    now = now or time.time()
+    rows, sess = {}, {}
+    for path, tool in usage_files():
+        if not os.path.isfile(path):
+            continue
+        for line in open(path, encoding="utf-8", errors="replace"):
+            try:
+                x = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(x, dict) or now - x.get("ts", 0) > days * 86400:
+                continue
+            t = x.get("tool") or tool or "?"
+            m = x.get("model") or "?"
+            a = rows.setdefault((t, m), dict(calls=0, input=0, output=0, cache_read=0, cache_write=0, cost=0.0))
+            a["calls"] += 1
+            for k in ("input", "output", "cache_read", "cache_write"):
+                a[k] += int(x.get(k) or 0)
+            p = next((v for k, v in PRICE.items() if k in m.lower()), None)
+            if p:
+                a["cost"] += (int(x.get("input") or 0) * p[0] + int(x.get("output") or 0) * p[1] +
+                              int(x.get("cache_read") or 0) * p[2] + int(x.get("cache_write") or 0) * p[3]) / 1e6
+            s = sess.setdefault((t, x.get("session") or x.get("conv") or "?"), dict(calls=0, maxctx=0, model=m))
+            s["calls"] += 1; s["maxctx"] = max(s["maxctx"], int(x.get("context") or 0))
+    if not rows:
+        return f"Frugal-Bridge: no usage logged in the last {days} days (files: " + \
+               ", ".join(p for p, _ in usage_files()) + ")"
+    out = [f"Frugal-Bridge usage, last {days} days (cost at API list prices; plans weigh output more)",
+           "| tool | model | calls | input | output | cache read | cache write | ~$ |", "|---|---|---|---|---|---|---|---|"]
+    for (t, m), a in sorted(rows.items(), key=lambda kv: (-kv[1]["cost"], kv[0])):
+        out.append(f"| {t} | {m} | {a['calls']} | {a['input']:,} | {a['output']:,} | {a['cache_read']:,} | "
+                   f"{a['cache_write']:,} | {a['cost']:.2f} |")
+    alerts = []
+    for (t, sid), s in sess.items():
+        lim = 100000 if any(k in s["model"].lower() for k in ("haiku", "flash", "mini", "luna", "nano")) else 150000
+        if s["maxctx"] > lim:
+            alerts.append(f"- {t} session {str(sid)[:18]}: context reached {s['maxctx'] // 1000}k ({s['model']}) → hand off earlier")
+        if s["calls"] > 300:
+            alerts.append(f"- {t} session {str(sid)[:18]}: {s['calls']} calls → split the work into sessions")
+    if alerts:
+        out.append("\nAlerts:\n" + "\n".join(alerts[:15]))
+    return "\n".join(out)
+
+
+def matrix_lines(g):
+    """What each installed tool got, one line each (printed after install)."""
+    r = g.reg()
+    out = []
+    for t, info in (r.get("tools") or {}).items():
+        h = HOSTS.H.get(t, {})
+        rules = (f"via {info['via']}" if info.get("via") else "hook (RULES.md)" if info.get("rules_copy") and t == "cursor"
+                 else "read: list" if info.get("rules_copy") else info.get("file", "?"))
+        hk = "yes" if t in (r.get("native_hooks") or []) else ("plugin" if t == "hermes" else
+                                                               "via claude-code" if h.get("hooks") in ("devin", "continue") and "claude-code" in r.get("tools", {}) else "no")
+        ti = (r.get("tiers") or {}).get(t) or {}
+        tiers = ", ".join(f"{n}={m}" + (f"/{e}" if e else "") for n, m, e, _ in ti.get("rows") or []) or \
+            ("frugal-tiers backend" if t == "hermes" else "rules" if (h.get("tiers") or "").startswith("rules-") else "none")
+        out.append(f"  {t}: rules {rules}; hooks {hk}; filter {'yes' if h.get('filter') and hk != 'no' else 'no'}; "
+                   f"tiers {tiers}; proxy {h.get('proxy') or 'no'}")
+    return out
 
 
 def main_global(argv):
@@ -943,34 +1347,39 @@ def main_global(argv):
     if argv[1] == "install":
         rep, log = g.install(hosts)
         print("\n".join(log)); print(rep)
-        tools = g.reg().get("tools", {})
+        r = g.reg()
+        tools = r.get("tools", {})
         print("Enforcement on this machine (every folder, every new session):")
-        print("  rules: " + ", ".join(sorted(tools)) + " load them by themselves")
-        if "claude-code" in tools:
-            print("  hooks: context watch + start files (tools with session/prompt hooks)")
-        for t, f in (g.reg().get("needs_user") or {}).items():
+        print("\n".join(matrix_lines(g)))
+        if "codex" in (r.get("native_hooks") or []):
+            print("  codex: open /hooks once in Codex and trust the Frugal-Bridge hooks (Codex runs hooks only after review)")
+        for t, f in (r.get("needs_user") or {}).items():
             print(f"  {t}: NEEDS USER — {f} does not exist and was not created (creating it would replace the")
             print(f"    tool's default identity). To turn the rules on there, create that file with your own identity text")
             print(f"    and re-run install --global, or paste this block into it:")
             print(getattr(g, "pending_block", ""))
-            c = (g.reg().get("copied") or {}).get(t)
+            c = (r.get("copied") or {}).get(t)
             if c:
                 print(f"  {t} plugin: copied to {c['plugin']} — enable it to turn it on (restarts that tool's gateway)")
-        if "hermes" in tools:
+        hh = HOSTS.root("hermes")
+        on = "hermes" in tools and hermes_plugin_enabled(hh, "frugal-bridge")
+        if "hermes" in tools and on:
+            print(f"  hermes plugin: {tools['hermes'].get('plugin')} — enabled")
+        elif "hermes" in tools:
             print(f"  plugin: copied to {tools['hermes'].get('plugin')} — enable it to turn it on (restarts that tool's gateway)")
-        if "hermes" in tools or "hermes" in (g.reg().get("copied") or {}):
+        if ("hermes" in tools or "hermes" in (r.get("copied") or {})) and g.tiers_status(hh).startswith("hermes tiers: on"):
+            print(f"  {g.tiers_status(hh)}")
+        elif "hermes" in tools or "hermes" in (r.get("copied") or {}):
             print(f"  tiers (per-subagent cheap/mid/top models): turn on with")
             print(f"    hermes plugins enable {TIERS_BACKEND}")
             print(f"    hermes config set delegation.backend {TIERS_BACKEND}")
-            prev = next(iter((g.reg().get("hermes_backend_prev") or {}).values()), "default")
+            prev = next(iter((r.get("hermes_backend_prev") or {}).values()), "default")
             print(f"    undo: hermes config set delegation.backend {prev} && hermes plugins disable {TIERS_BACKEND}")
-        proxy = [b for b in PROXY_TOOLS if shutil.which(b)]
-        if proxy:
-            print(f"  proxy available for: {', '.join(proxy)} — optional, adds enforcement (adapter/proxy/)")
-        if g.reg().get("base"):
-            print(f"  user files: the knowledge base {g.reg()['base']} owns them (no second copy made)")
+        if r.get("base"):
+            print(f"  user files: the knowledge base {r['base']} owns them (no second copy made)")
         else:
             print(f"  user file: {os.path.join(g.d, 'USER.md')} — fill it (name of the main agent, language, style)")
+        print("  usage report: python3 kit/setup.py report [days]")
         return 0 if rep.startswith("OK") else 1
     if argv[1] == "uninstall":
         print("\n".join(g.uninstall())); return 0
@@ -979,6 +1388,8 @@ def main_global(argv):
 
 
 def main(argv):
+    if len(argv) >= 2 and argv[1] == "report":
+        print(report(int(argv[2]) if len(argv) > 2 and argv[2].isdigit() else 7)); return 0
     if len(argv) >= 2 and "--global" in argv and argv[1] in ("install", "uninstall", "check"):
         return main_global(argv)
     if len(argv) < 3 or argv[1] not in ("install", "uninstall", "check"):

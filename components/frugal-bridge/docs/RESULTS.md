@@ -904,3 +904,50 @@ Readings:
   ($0.0493), result `route` labels `cheap: claude-haiku-5-5` / `mid: claude-sonnet-5-5`, both answers right (391,
   551). A call with no tier → child `claude-opus-5-5` (parent's model), answer right (403).
 
+
+### 2.37 Every live harness: rules, enforcement, helper tiers (model + effort), usage (2026-11-11)
+- Gap: `install --global` covered 5 tools (claude-code, codex, gemini, opencode, hermes); only Claude Code had
+  hooks, only Hermes had per-helper tiers; detection counted a folder (e.g. `~/.gemini`, also made by Antigravity).
+- Built `kit/hosts.py`: one row per live harness (24: Claude Code, Codex, Gemini CLI, Antigravity, Qwen, opencode,
+  Hermes, OpenClaw, Grok Build, Copilot CLI, Crush, Goose, Amp, Aider, Kilo, Droid, Warp CLI, Cursor, Devin, Kiro,
+  Cline, Continue, Zed, Junie) from the harness audit; 5 more documented only (Roo Code EOL, Claude app, Claude Duet,
+  ChatGPT desktop = Codex row, Warp app rules).
+  - Detection = binary on PATH or a config file only that tool writes; `--hosts` installs only installed ones.
+  - Rules: the base's file when it has a base block (Frugal after it), else the tool's own / a dedicated rules-dir
+    file; tools that load another installed tool's file get no copy (Kilo, Devin → Claude's; Droid, Cline → Warp's);
+    `~/.config/AGENTS.md` never written (Crush + Amp); Codex `AGENTS.override.md` respected; caps checked (Codex 32
+    KiB, Hermes / OpenClaw 20k chars, Droid 80k); SOUL.md / OpenClaw seed never created. Cursor has no rules file:
+    its sessionStart hook brings `RULES.md`; Aider gets it through `read:`.
+  - Config writers per format (JSON, JSONC with comments kept, TOML, YAML list, crushrc lines) with a ledger: text
+    before + hash after; uninstall gives the bytes back when untouched, else removes only Frugal's keys/lines.
+    Upgrade fix found in a rehearsal on a copy of the user's config: restoring the older install's snapshot of
+    `~/.claude/settings.json` would have dropped the base's `permissions` added since; the ledger now starts from the
+    current text (regression test).
+  - Hooks: one script for every tool with command hooks (`--tool`, `--event`), answering in each tool's own field:
+    output filter in Claude Code / Junie `updatedToolOutput`, Copilot `modifiedResult`, Crush `updated_output`,
+    Gemini AfterTool deny+reason, Codex PostToolUse block+reason (partial); start files everywhere a start event
+    can add context; context watch from transcripts or logged usage. JS plugins for opencode (V1+V2), Kilo, Amp.
+    Run-once: the Claude entry stands down when the calling tool (Cursor marks its payload) has its own entry, and a
+    per-event marker drops a second call (Devin / Grok / Continue run Claude's hooks).
+  - Helper tiers from `tiers.json` unchanged (no new A/B): `frugal-cheap/mid/mid-writing/top` with the model of the
+    tool's provider family and the effort in the tool's own field (Claude `effort`, Codex `model_reasoning_effort`,
+    Cursor `model: id[effort=..]`, Droid / Kilo `reasoningEffort`, Junie `reasoningLevel`, Copilot `effortLevel`,
+    Gemini thinkingLevel, opencode `#high`); Qwen grades, Kiro / Devin agents, Goose recipes, Grok built-ins (model
+    only, no per-helper effort there); OpenClaw / Zed rules give the exact values; impossible: Amp, Crush, Aider,
+    Cline, Warp, Continue, apps. mid-writing = mid at high (public English writing); never low, no xhigh/max (test).
+  - Usage: Claude Stop (transcript, each message once), Codex PostModelRequest, Cursor preCompact, JS plugins →
+    `$FRUGAL_HOME/usage.jsonl`; `python3 kit/setup.py report [days]` merges hooks + Hermes plugin + proxy logs.
+- Tests 235/235 (+111): every row install → check → re-run byte-identical → uninstall byte-identical (24), rules
+  loaded once (24), all tools at once byte-identical, shared files once, base present → one block after it in the
+  base's file, caps, override, identity files, tier model + effort per tool, hooks per tool, user edits kept,
+  report, hook IO per tool, run-once, usage, JS plugins under node. Rehearsal on a path-rewritten copy of the user's
+  Claude / Codex / Gemini / Hermes config: install OK, re-run identical, uninstall leaves only the Frugal parts gone.
+
+### 2.38 Re-run after another kit changed a settings file (2026-11-11)
+- Bug (found by the Skeleton Base suite against 2.37, real `brain.py` connect → Frugal install → disconnect → Frugal
+  re-run → Frugal uninstall): the re-run kept the ledger's "text from before" (which still held the base's hooks and
+  folder entry) and stored a new "hash after"; uninstall saw an untouched file and wrote that old text back, so the
+  disconnected base's hooks and `additionalDirectories` came back in `~/.claude/settings.json`.
+- Fix: a re-run that finds the file changed since Frugal's last write marks the recorded text `orig_stale`; uninstall
+  then removes only Frugal's own keys/hooks (and removes a file left empty unless the user's original was empty).
+- Regression test `test_global_rerun_after_base_disconnect_never_brings_base_entries_back`. Tests 236/236.

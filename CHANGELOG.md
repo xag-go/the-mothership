@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.0 (2026-11-11)
+
+- Skeleton Base 1.4.0 (`e15a9a9`) vendored from GitHub (was 1.3.5 `e66997f`): one tool table (26 rows) for
+  `connect`: one pointer block per tool in the file it loads, the base on each tool's own allow list, skills once
+  in `~/.agents/skills`, more memory stores collected, `brain.py mcp` (stdio MCP server) and `connect --mcp`.
+- Frugal-Bridge `25de157` vendored from GitHub (was `45a0440`): hosts table (24 tools), rules once per tool after the
+  base block, hooks / JS plugins per tool, helper tiers with model **and** effort in each tool's own setting, usage
+  log + `setup.py report`; and a fix: an uninstall after a re-run no longer brings back entries another kit removed
+  in between (a disconnected base's hooks in `~/.claude/settings.json`).
+- `install.py`: Frugal-Bridge's user-level install runs with `--hosts auto` (its table, installed tools only);
+  `--mcp` is passed to the base's `connect` and kept for re-runs and `update`; new `report [DAYS]` command (Frugal's
+  usage report); the summary and `status` list which tools each product set up; the plan says "every tool found".
+  An already connected base is found through every rules file of Skeleton Base's tool table.
+- README: "Which tools, which provider" points to both products' tool matrices.
+- Tests: the test home has its tools' programs on PATH (claude, codex, gemini; Skeleton Base 1.4.0 and Frugal only
+  count a tool by its program or own config file, `~/.gemini` alone is not Gemini CLI) and Hermes homes have a
+  `config.yaml`; new: every found tool (also Qwen Code, opencode) connected with `--mcp` and Frugal's hosts, re-run
+  identical, uninstall byte-identical; dry-run plan; `report` (56 tests).
+
 ## v1.0.9 (2026-11-11)
 
 - Frugal-Bridge `45a0440` vendored from GitHub (was `7e4cf9e`): new `frugal-tiers` plugin gives each helper a

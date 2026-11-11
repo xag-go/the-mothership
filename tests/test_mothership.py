@@ -84,6 +84,11 @@ class Base(unittest.TestCase):
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         (self.bin / "python3").symlink_to(sys.executable)
+        # the tools this home has: their program on PATH (Skeleton Base 1.4.0+ and Frugal-Bridge detect a tool by its
+        # program or its own config file; a folder alone, e.g. ~/.gemini also made by other apps, is not proof)
+        for prog in ("claude", "codex", "gemini"):
+            (self.bin / prog).write_text("#!/bin/sh\nexit 0\n")
+            (self.bin / prog).chmod(0o755)
         self.sd_log = self.tmp / "systemctl.log"
         self.sd_state = self.tmp / "systemctl.state"
         self.extra_env = {}
@@ -284,6 +289,7 @@ class InstallTests(Base):
         self.assertEqual(tree(self.home), t0)
         soul = self.home / ".hermes/SOUL.md"
         soul.parent.mkdir()
+        (soul.parent / "config.yaml").write_text("model: default\n")      # an installed Hermes has its config
         soul.write_text("You are my assistant.\n")
         t0 = tree(self.home)
         self.ms("--yes", HERMES_AGENT="true")
@@ -299,6 +305,7 @@ class InstallTests(Base):
             with self.subTest(name=name):
                 base = self.home / name
                 (self.home / ".hermes").mkdir(exist_ok=True)
+                (self.home / ".hermes/config.yaml").write_text("model: default\n")
                 (self.home / ".hermes/SOUL.md").write_text("You are my assistant.\n")
                 self.ms("--yes", "--base", base)
                 plug = self.home / ".hermes/plugins/frugal-bridge/__init__.py"
@@ -313,6 +320,52 @@ class InstallTests(Base):
                     self.assertIn(str(f), hint)
                 self.assertNotIn(str(self.home / ".frugal-bridge/USER.md"), hint)
                 self.ms("uninstall", "--base", base, "--no-backup")
+
+    def test_every_found_tool_connected_with_mcp_and_frugal_hosts(self):
+        """1.1.0: both products' tool tables: every tool found (here also Qwen Code and opencode) gets the base block
+        and then Frugal-Bridge's block; --mcp reaches Skeleton Base's connect and is kept for re-runs; uninstall puts
+        the home back byte for byte."""
+        for prog in ("qwen", "opencode"):
+            (self.bin / prog).write_text("#!/bin/sh\nexit 0\n")
+            (self.bin / prog).chmod(0o755)
+        (self.home / ".qwen").mkdir()
+        (self.home / ".config/opencode").mkdir(parents=True)
+        t0 = tree(self.home)
+        out = self.ms("--yes", "--mcp")
+        self.assertIn("checks: all OK", out)
+        self.assertIn("every tool found", out)
+        qwen, oc = self.home / ".qwen/QWEN.md", self.home / ".config/opencode/AGENTS.md"
+        for f in self.rules() + [qwen, oc]:
+            self.assert_order(f)
+        self.assertTrue(self.state()["options"]["mcp"])
+        self.assertTrue(json.loads((self.base / ".kits.json").read_text())["kits"]["base-folder"]["connect"]["mcp"])
+        self.assertIn("skeleton-base", json.loads((self.home / ".claude.json").read_text())["mcpServers"])
+        self.assertIn("skeleton-base", json.loads((self.home / ".qwen/settings.json").read_text())["mcpServers"])
+        line = next(l for l in out.splitlines() if l.startswith("Frugal-Bridge for: "))
+        for t in ("claude-code", "codex", "gemini", "qwen", "opencode"):
+            self.assertIn(t, line)
+        self.assertIn("~/.qwen/QWEN.md", out)
+        t1 = tree(self.home)
+        self.ms("--yes")                                     # a re-run without --mcp keeps the first choice
+        self.assertEqual(tree(self.home), t1)
+        st = self.ms("status")
+        self.assertIn("mcp=yes", st)
+        self.assertIn("Frugal-Bridge for: ", st)
+        self.ms("uninstall", "--no-backup")
+        self.assertEqual(tree(self.home), t0)
+
+    def test_dry_run_plan_names_mcp_and_hosts_table(self):
+        out = self.ms("--dry-run", "--mcp")
+        self.assertIn("MCP server", out)
+        self.assertIn("--hosts auto", out)
+        self.assertFalse(self.base.exists())
+
+    def test_report_command_runs_frugal_usage_report(self):
+        out = self.ms("report", "3")
+        self.assertIn("3 days", out)
+        self.ms("--yes")
+        out = self.ms("report")
+        self.assertIn("Frugal-Bridge", out)
 
     def test_no_frugal(self):
         t0 = tree(self.home)
@@ -1158,6 +1211,7 @@ class RealToolTests(Base):
         claude = shutil.which("claude", path=os.environ.get("PATH")) or str(Path.home() / ".local/bin/claude")
         cred = Path.home() / ".claude" / ".credentials.json"
         self.assertTrue(Path(claude).exists() and cred.is_file(), "claude CLI or credentials missing")
+        (self.bin / "claude").unlink()                      # the fake one from setUp
         (self.bin / "claude").symlink_to(Path(claude).resolve())
         shutil.copy2(cred, self.home / ".claude" / ".credentials.json")
         self.ms("--yes")

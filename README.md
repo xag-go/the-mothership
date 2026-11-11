@@ -34,6 +34,7 @@ background watcher. `--dry-run` shows the plan and writes nothing.
 python3 the-mothership/install.py --base ~/notes/brain     # another folder for the base (see below for spaces)
 python3 the-mothership/install.py --no-frugal              # only the knowledge base
 python3 the-mothership/install.py --no-watch [--timer]     # no watcher service (or only a daily timer)
+python3 the-mothership/install.py --mcp                    # also register the base's MCP server in each tool
 python3 the-mothership/install.py --verbose                # also show both products' own output
 ```
 
@@ -51,7 +52,9 @@ continues. If a step fails on a first install, everything it did is undone.
 |---|---|
 | your knowledge base (Skeleton Base) | `~/skeleton-base-home/` (or `--base DIR`) |
 | Frugal-Bridge rules for that folder | inside the base's `AGENTS.md`, in its own marked block after the base block |
-| a pointer to the base + Frugal-Bridge rules in each AI tool's user-level rules file | `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`, and others that exist (Qwen Code, opencode, Windsurf, Kiro, OpenClaw, Hermes): each product only adds its own marked block, your text stays as it is |
+| a pointer to the base + Frugal-Bridge rules in each AI tool's user-level rules file, for **every tool found** | one file per tool, the one that tool loads (e.g. `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`, `~/.qwen/QWEN.md`, `~/.config/opencode/AGENTS.md`, Hermes `SOUL.md` when it exists, and the other rows of both products' tool tables): each product only adds its own marked block, base first, your text stays as it is |
+| the base on each tool's own allow list (read + write from any folder) and, with `--mcp`, the base's MCP server in each tool's MCP config | each tool's own setting (Skeleton Base `connect`), recorded and removed by `disconnect` |
+| Frugal-Bridge hooks / plugins and helper tiers (cheap / mid / top: model **and** effort for your provider) per tool | each tool's own hook, plugin and subagent files (Frugal-Bridge `install --global --hosts auto`) |
 | Claude Code hooks (collect memories at session end, Frugal-Bridge context watch) and read access to the base from any folder | merged into `~/.claude/settings.json` (your keys and hooks are kept) |
 | Frugal-Bridge user-level files | `~/.frugal-bridge/` (`FRUGAL_HOME` moves it): its hook and `global.json`. Your profile lives in the base (`wiki/me/`), so there is no second user file |
 | the base's pointer file (other kits find the base there, even when no tool rules file names it) | `~/.config/skeleton-base/base`: one line, the base folder |
@@ -68,12 +71,25 @@ unclear lands on a review card in `board/`). An adopted base is **never downgrad
 release (`.kits.json` `kits.base-folder.release`, or the `RELEASE` line of its `tools/brain.py`) is newer than the
 vendored one, it is kept as it is and the summary says so; `--force` installs the vendored version over it.
 
+## Which tools, which provider
+
+Any tool, any provider. Both products keep one tool table each, and The Mothership simply runs them for every tool
+it finds (a tool counts as installed when its program is on `PATH` or its own config file exists):
+
+- what the base gives each tool (finds the base, reads + writes it, its memory collected, MCP):
+  [Skeleton Base's tool matrix](components/skeleton-base/README.md#connect-every-tool-on-this-computer-knows-the-base)
+- what Frugal-Bridge sets up in each tool (rules, hooks / plugin, output filter, helper tier model + effort, usage
+  log, proxy): [Frugal-Bridge's matrix](components/frugal-bridge/adapter/README.md#every-tool-what-install---global-sets-up-the-matrix)
+
 ## Check, status, update
 
 ```sh
 python3 ~/.local/share/the-mothership/payload/install.py check    # names each problem; exit 1 on install problems
 python3 ~/.local/share/the-mothership/payload/install.py status   # what is installed, versions, connected tools
+python3 ~/.local/share/the-mothership/payload/install.py report 7 # tokens per tool and model, last 7 days
 ```
+
+`report` is Frugal-Bridge's usage report: what its hooks, plugins and proxy logged for every tool.
 
 `check` runs both products' own checks, `brain.py lint`, and its own: one base block and one Frugal-Bridge block
 per rules file (base first), Frugal-Bridge uses the base as its only user file, the watcher is running, and the

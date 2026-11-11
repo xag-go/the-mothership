@@ -38,6 +38,8 @@ def home(_isolated_home, monkeypatch):
     for tool in ("python3", "git"):
         if shutil.which(tool):
             os.symlink(shutil.which(tool), b / tool)
+    for tool in ("claude", "hermes"):          # fake binaries: Frugal counts a tool as installed by its binary
+        (b / tool).write_text("#!/bin/sh\nexit 0\n"); (b / tool).chmod(0o755)
     return h
 
 
