@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.8 (2026-11-11)
+
+- Frugal-Bridge `7e4cf9e` vendored from GitHub (was `16a2b9c`): its adapters (Hermes plugin, hooks, proxy) now name
+  the start files in every install order. The knowledge base is found the same way Frugal's setup finds it, fresh
+  each session (a base connected or removed later is used without re-installing), and a folder slot such as
+  `wiki/me/` is listed as its `.md` files. Before, the Hermes plugin gave no start hint after a user-level install.
+- Test: after one install the copied Hermes plugin names the base's `hot.md` and every `wiki/me/*.md`, also for a
+  base path with spaces.
+
 ## v1.0.7 (2026-11-11)
 
 - Frugal-Bridge `16a2b9c` vendored from GitHub (was `3c86a64`): its tests run with an isolated HOME/FRUGAL_HOME (conftest), so a real install on the machine can't change a result. No code change.

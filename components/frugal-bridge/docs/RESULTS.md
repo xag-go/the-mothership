@@ -859,3 +859,22 @@ Readings:
   `~/.frugal-bridge/global.json` (69/70). Fix: `conftest.py` in `kit/` and `adapter/` gives every test its own HOME and
   FRUGAL_HOME and unsets tool home/agent variables. This machine (real global install present): 70/70; kit and adapter
   alone pass too; the real global.json is unchanged after the run.
+
+### 2.35 Start files in every install order (2026-11-11)
+- Bug: the Hermes plugin gave the first-turn start-file hint only when `<tool home>/frugal-bridge/config.json` had
+  `base_dir`, which only a project install writes: after `install --global` it never fired. The hook and the proxy
+  found a base only through `global.json` `base` (the proxy only with `project_dir` set), and a folder slot
+  (base `user` = `wiki/me/`) was named as a folder, not as files.
+- Fix: one shared resolver (identical block in `adapter/hooks`, `adapter/plugin`, `adapter/proxy`; a test keeps the
+  copies equal): project `.kits.json` / files first, then the base found like `kit/setup.py find_base`
+  (`FRUGAL_BASE`, `global.json` base, `Path:` lines, pointer file, systemd units; each must register `base-folder`),
+  else `$FRUGAL_HOME/USER.md`; nothing found = no hint. Resolved on every first turn (no cache). Folder slots expand
+  to their `.md` files (sorted, max 8, "+N more" note); paths with spaces are quoted.
+- New `adapter/test_install_orders.py` (isolated HOME/HERMES_HOME/FRUGAL_HOME, clean env for subprocesses, real
+  Skeleton Base `brain.py` and The Mothership `install.py`; plugin, hook and proxy must give the same hint): a base
+  first then `--global`; b `--global` first (USER.md) then base init+connect, same loaded plugin switches; b' base
+  connected with no Frugal re-run (kit not findable) still switches; c disconnect / uninstall -> USER.md again;
+  d Mothership install -> base files; e project install in the base, outside it (and project removed -> base), no
+  base; f no base -> USER.md, nothing -> no hint, broken global.json / stale pointer -> no crash; g every base
+  order also with "My Base Folder"; discovery order equals setup.py's, source by source. 17/17; before the fix 16/17
+  failed. Full suite 87/87.

@@ -668,6 +668,7 @@ Full detail and numbers: `abtest/RESULTS.md` (single source of truth). Summary:
 | Install once, everywhere | `setup.py install --global` (default in INSTALL.md) | built 2026-11-11: rules in each tool's user-level file, user-level hooks/skills/plugin, one `~/.frugal-bridge/USER.md`; real test: new session in an empty folder loaded the rules (RESULTS §2.27) |
 | Agent-driven install | `INSTALL.md` (public repo root) | built; real test: Claude Code set it up from one sentence, check OK, new session loads the rules (RESULTS §2.24) |
 | Public repo | <this repository's URL> (public, MIT) | v0.1.0 pushed 2026-11-11: kit, adapters, docs (DESIGN, RESULTS, COEXISTENCE); harness not published. Sync: `./publish.sh` then commit in `~/frugal-bridge-public` |
+| Start files in any install order | shared resolver in `adapter/hooks`, `adapter/plugin`, `adapter/proxy` | built 2026-11-11: base found like `setup.py find_base`, fresh every session, folder slots expanded; `adapter/test_install_orders.py` covers base-first, Frugal-first, disconnect/uninstall, Mothership, project install, no base, spaces (RESULTS §2.35) |
 | Week test on real work | — | not started (after live install) |
 
 

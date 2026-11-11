@@ -18,8 +18,12 @@ The user never chooses: they ask their AI to "set up Frugal-Bridge" (`INSTALL.md
   once, to offer the user a new session with a handoff / compact / carry on; at 300k it says it plainly. Notices go at
   the end of the turn, never the start, so the prompt cache stays valid.
 - **Start files:** on a session's first turn, the agent reads the "now" and "user" files first, in one call. Paths
-  come from `.kits.json` `slots` (project folder + up to 3 parents) — so it works the same next to a knowledge base —
-  else `PROGRESS.md` / `USER.md`.
+  come from the project's `.kits.json` `slots` (project folder + up to 3 parents) or its `PROGRESS.md` / `USER.md`;
+  what is missing comes from the connected knowledge base's slots (found like `kit/setup.py` finds it: `FRUGAL_BASE`,
+  the base recorded in `global.json`, the base block's `Path:` line in a tool's rules file, the pointer file
+  `~/.config/skeleton-base/base`, the base's systemd units), else the one `~/.frugal-bridge/USER.md`. Resolved fresh
+  every session, so a base connected or removed later is used without re-installing. A folder slot (e.g.
+  `wiki/me/`) is listed as its `.md` files (sorted, at most 8). The same code is in all three mechanisms.
 - **Output filter:** shell output over ~12k characters is cut to head + error lines + tail; the full text is saved to
   a file whose path is given (file reads are never cut).
 - **Loop guard (proxy):** the same tool call with the same result twice, or two calls failing with the same error →
@@ -37,7 +41,9 @@ shell output rely on the `frugal-filter-output` skill for that rule. (Uses the h
 **`plugin/frugal-bridge/`** — hooks on API requests, on each turn and on terminal output, plus a `/frugal` command.
 Setup copies it into the tool's plugin folder; enabling it restarts that tool's gateway, so it is left to the user
 (e.g. Hermes Agent: `hermes plugins enable frugal-bridge`). Optional `<tool home>/frugal-bridge/config.json`:
-`{"base_dir": "...", "ctx_warn": 150000, "ctx_hard": 300000, "ctx_warn_cheap": 100000, "out_limit": 12000}`.
+`{"base_dir": "...", "ctx_warn": 150000, "ctx_hard": 300000, "ctx_warn_cheap": 100000, "out_limit": 12000}`
+(`base_dir` is written by a project install only; without it the start files come from the knowledge base or
+`~/.frugal-bridge/USER.md`).
 
 **`proxy/frugal_proxy.py`** — sits between any tool and any provider. Run it, then point the tool's base URL at
 `http://127.0.0.1:8790/<route>` (routes: `anthropic`, `openai`, `chatgpt`, `openrouter`, `gemini`, `xai`; more in

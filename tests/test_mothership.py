@@ -292,6 +292,28 @@ class InstallTests(Base):
         self.ms("uninstall", HERMES_AGENT="true")
         self.assertEqual(tree(self.home), t0)
 
+    def test_hermes_plugin_start_hint_names_the_base_files(self):
+        """After one install, the copied Hermes plugin (no project config) tells a new session to read the base's
+        "now" file and every .md file of its user folder, in a base path with spaces too."""
+        for name in ("skeleton-base-home", "My Base"):
+            with self.subTest(name=name):
+                base = self.home / name
+                (self.home / ".hermes").mkdir(exist_ok=True)
+                (self.home / ".hermes/SOUL.md").write_text("You are my assistant.\n")
+                self.ms("--yes", "--base", base)
+                plug = self.home / ".hermes/plugins/frugal-bridge/__init__.py"
+                self.assertFalse((self.home / ".hermes/frugal-bridge/config.json").exists())
+                code = ("import importlib.util,sys;s=importlib.util.spec_from_file_location('fb',sys.argv[1]);"
+                        "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+                        "r=m.on_pre_llm_call(session_id='x',is_first_turn=True);print(r and r['context'])")
+                hint = self.py("-c", code, plug, HERMES_HOME=str(self.home / ".hermes"))
+                me = sorted((base / "wiki/me").glob("*.md"))
+                self.assertTrue(me)
+                for f in [base / "hot.md", *me]:
+                    self.assertIn(str(f), hint)
+                self.assertNotIn(str(self.home / ".frugal-bridge/USER.md"), hint)
+                self.ms("uninstall", "--base", base, "--no-backup")
+
     def test_no_frugal(self):
         t0 = tree(self.home)
         out = self.ms("--yes", "--no-frugal")
