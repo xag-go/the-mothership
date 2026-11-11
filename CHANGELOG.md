@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.3 (2026-11-12)
+
+- Skeleton Base 1.5.2 (`2abbf49`) vendored (was 1.5.1 `a31a61a`): `brain.py file` no longer flags a false
+  "negation" conflict. A "not" in another clause of a long memory is no longer compared against an unrelated
+  page sentence; real flips and changed numbers stay flagged. 3 regression tests in Skeleton Base.
+
 ## v1.1.2 (2026-11-12)
 
 - Skeleton Base 1.5.1 (`a31a61a`) vendored from GitHub (was 1.4.1 `e282bde`), with 1.5.0: `brain.py file` (collected
