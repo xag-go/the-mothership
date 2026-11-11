@@ -69,4 +69,5 @@ python3 kit/setup.py check --global              # or: check "<folder>"
 Tell the user, briefly: what was installed and where, which rules are **enforced** on this machine (from the
 "Enforcement" lines) and that all other rules are **followed** by the agent, the main agent's name, and how to undo:
 `python3 kit/setup.py uninstall --global` (plus the tool's disable command if a plugin was enabled).
+Tell them uninstall keeps all their data (their text, user file, project files, usage logs; edited parts are kept).
 From the next new session on, it works by itself — nothing to repeat.

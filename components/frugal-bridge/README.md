@@ -37,10 +37,14 @@ Install once: from then on it works by itself in every project and every new ses
 git clone <this repository's URL> frugal-bridge && cd frugal-bridge
 python3 kit/setup.py install --global      # once: every agent tool on this machine, every folder, every new session
 python3 kit/setup.py check --global
-python3 kit/setup.py uninstall --global    # restores your files
+python3 kit/setup.py uninstall --global    # removes only Frugal-Bridge's own parts; your data stays
 # one folder only: python3 kit/setup.py install /path/to/project
 ```
 Before installing, edit `kit/ROUTING.md` with the models you use (re-run `install` after any change).
+
+**Removing it never costs you data.** Uninstall takes out only what Frugal-Bridge wrote and you did not change: your own
+text in every file stays byte for byte, your user file, project files, usage logs and backups stay, files you edited or
+added inside its folders stay, and a rules block you edited is saved to `kept/` before it is removed.
 
 ## Works with everything
 | Where your AI runs | How Frugal-Bridge reaches it |

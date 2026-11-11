@@ -109,7 +109,7 @@ parts are never removed by `uninstall`.
   path only up to the first space; `--no-frugal` then installs it.
 - Hermes without `SOUL.md`: Frugal-Bridge (since `a84e5ec`) never creates it (it would replace Hermes' default
   identity); its rules for Hermes wait until the user writes one, and uninstall leaves the Hermes folder as it was.
-  Frugal-Bridge `4920444` still uses the base there: with no rules file carrying the base block it finds the base
+  Frugal-Bridge `3c86a64` still uses the base there: with no rules file carrying the base block it finds the base
   from Skeleton Base's pointer file `~/.config/skeleton-base/base` (written by `connect` since 1.3.3) or its systemd
   units, so there is no second user file.
 - `systemctl` parts run only where `systemctl --user` works. No launchd agent.

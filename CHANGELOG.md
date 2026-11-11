@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.5 (2026-11-11)
+
+- Frugal-Bridge `3c86a64` vendored from GitHub (was `4920444`): its uninstall never loses user data (only unchanged own files removed, edited blocks saved to `kept/`) and leaves no empty leftovers.
+- Test: the vendored Frugal-Bridge suite check accepts any test count with 0 failed.
+
 ## v1.0.4 (2026-11-11)
 
 Uninstall keeps your data (owner rule: removing The Mothership or Skeleton Base never loses the user's data).

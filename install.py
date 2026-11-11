@@ -25,7 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 ROOT = Path(__file__).resolve().parent
 LOCK = "components.lock"
 STATE = ".mothership.json"
