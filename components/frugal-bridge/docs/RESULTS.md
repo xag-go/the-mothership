@@ -878,3 +878,29 @@ Readings:
   base; f no base -> USER.md, nothing -> no hint, broken global.json / stale pointer -> no crash; g every base
   order also with "My Base Folder"; discovery order equals setup.py's, source by source. 17/17; before the fix 16/17
   failed. Full suite 87/87.
+
+### 2.36 Model tier per helper: `frugal-tiers` delegation backend (2026-11-11)
+- Gap: "checkable work → cheap helper" was advice only in Hermes: every `delegate_task` child ran on the parent's
+  model (one `delegation.model` for all was the only knob).
+- Built `adapter/plugin/frugal-tiers/` (Hermes delegation provider, `delegation.backend: frugal-tiers`): per-task
+  `tier` (cheap/mid/top) and `effort` (low/medium/high) on `delegate_task`; 3-line routing guidance in its
+  description; tier → model of the parent's provider family from `tiers.json`, generated from `kit/ROUTING.md` (a test
+  fails when they differ). Families: native Anthropic (`claude-haiku-5-5`), OpenAI/Codex, Gemini, and `vendor/model`
+  ids on aggregators (OpenRouter-style `anthropic/claude-haiku-5.5`). No tier = default route; unknown family or a
+  missing table entry = default route + label note; unknown tier/effort = that task refused. Per-tier overrides in
+  `delegation.backends.frugal-tiers`. No network.
+- `setup.py`: copies it beside the frugal-bridge plugin (global + project), prints the two turn-on commands + undo,
+  records `delegation.backend` from before; uninstall removes only its files and, if the backend still names
+  frugal-tiers, restores the recorded value via `hermes config set` (prints the command when the binary is absent);
+  `check` shows `hermes tiers: on|off`. Rules + `frugal-delegate` skill: pass the tier's model on the subagent call
+  (Claude: haiku/sonnet/opus; a `tier` field when offered; none = say the helper runs on your model). Matrix in
+  `adapter/README.md` (delegation backend = enforced; model field = agent's choice; Codex/others = rules + proxy).
+- Tests 124/124 (+37: every tier on anthropic / openai / openai-codex / gemini / openrouter / nous parents, inherit
+  cases, overrides, errors, schema, ROUTING parse + sync, setup copy/check/uninstall byte-identical, backend restore
+  with a fake `hermes`, and a real load through the installed Hermes `PluginManager` → `get_active_provider` →
+  `schema_extension` in an isolated HERMES_HOME).
+- Live (user's Hermes, previous `delegation.backend` = `default`): `hermes chat -q` from /tmp, one `delegate_task`
+  with `tier: cheap` + `tier: mid` → children in state.db: `claude-haiku-5-5` ($0.0032) and `claude-sonnet-5-5`
+  ($0.0493), result `route` labels `cheap: claude-haiku-5-5` / `mid: claude-sonnet-5-5`, both answers right (391,
+  551). A call with no tier → child `claude-opus-5-5` (parent's model), answer right (403).
+

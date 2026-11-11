@@ -16,6 +16,8 @@ agent in `USER.md`.
 3. Creates USER / PROGRESS / DECISIONS / `sources/` from templates — unless a knowledge base already owns them.
 4. Installs the adapter for every agent tool it finds (`--hosts auto`): hooks where the tool has hooks, a plugin where
    it has plugins (enabling it is your call: it restarts that tool), and tells you which tools could use the proxy.
+   Tools with a delegation-backend plugin (e.g. Hermes) also get `frugal-tiers` (a cheap/mid/top model per helper);
+   setup prints the two commands that turn it on and the undo.
    Force a choice with `--hosts <list>` (`none` = rules only).
 5. Checks: one block, pointers import `AGENTS.md`, start files exist, whole `AGENTS.md` under 32 KiB (some tools read
    only the first 32 KiB).

@@ -669,6 +669,7 @@ Full detail and numbers: `abtest/RESULTS.md` (single source of truth). Summary:
 | Agent-driven install | `INSTALL.md` (public repo root) | built; real test: Claude Code set it up from one sentence, check OK, new session loads the rules (RESULTS §2.24) |
 | Public repo | <this repository's URL> (public, MIT) | v0.1.0 pushed 2026-11-11: kit, adapters, docs (DESIGN, RESULTS, COEXISTENCE); harness not published. Sync: `./publish.sh` then commit in `~/frugal-bridge-public` |
 | Start files in any install order | shared resolver in `adapter/hooks`, `adapter/plugin`, `adapter/proxy` | built 2026-11-11: base found like `setup.py find_base`, fresh every session, folder slots expanded; `adapter/test_install_orders.py` covers base-first, Frugal-first, disconnect/uninstall, Mothership, project install, no base, spaces (RESULTS §2.35) |
+| Tier per helper (Hermes delegation backend) | `adapter/plugin/frugal-tiers/` + `tiers.json` from `kit/ROUTING.md` | built 2026-11-11: `tier`/`effort` per delegate task, mapped to the parent's provider family; installed and on in the user's Hermes (RESULTS §2.36). Claude Code: rules + skill say pass the model; Codex/others: rules only (+ proxy option) |
 | Week test on real work | — | not started (after live install) |
 
 

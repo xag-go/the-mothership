@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.0.9 (2026-11-11)
+
+- Frugal-Bridge `45a0440` vendored from GitHub (was `7e4cf9e`): new `frugal-tiers` plugin gives each helper a
+  cheap / mid / top model from Frugal's routing table, mapped to the parent's provider (tools with a delegation
+  backend, e.g. Hermes). It is copied with the other plugin; turning it on stays the user's step (setup prints the
+  two commands and the undo). Uninstall removes only its files and puts `delegation.backend` back when it still
+  names `frugal-tiers`. The rules now tell agents to pass the tier's model on a subagent call.
+
 ## v1.0.8 (2026-11-11)
 
 - Frugal-Bridge `7e4cf9e` vendored from GitHub (was `16a2b9c`): its adapters (Hermes plugin, hooks, proxy) now name

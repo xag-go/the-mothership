@@ -26,7 +26,9 @@ max can return nothing).
 | Data analysis memos; partner thinking, brainstorming | mid, medium (memo that drives a decision → top) |
 | Checkable work: bug fixes and small features with tests, extraction, fact-check, scheduling, formatting, small clear design | cheap, medium |
 
-- To use another tier, send the work to a helper on that tier. Do not switch the chat's own model.
+- To use another tier, send the work to a helper on that tier and **set its model on the call**: a `model` field
+  takes the tier's model (Claude: cheap = haiku, mid = sonnet, top = opus; other providers: `ROUTING.md`), a `tier`
+  field takes cheap / mid / top. No such field = the helper runs on your model; say so. Never switch the chat's own model.
 - The main agent runs on top, so **checkable work (code with tests, extraction, formatting) goes to a cheap helper**,
   not done by the main agent itself. Small replies (noting a preference, a short answer) it does itself, no helper.
 - **Checkable work starts cheap and moves up only on a real failed check** (tests fail, exact answer wrong):

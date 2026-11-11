@@ -61,6 +61,60 @@ def write(p, text):
 HOOK_TOOLS = {"claude-code": ("claude", ".claude", ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")),
               "gemini": ("gemini", ".gemini", ("GEMINI_CLI",))}
 PLUGIN_TOOLS = {"hermes": ("hermes", None, ("HERMES_HOME", "HERMES_AGENT"))}
+PLUGINS = ("frugal-bridge", "frugal-tiers")   # Hermes-style plugins copied for a plugin tool (enabling = user step)
+TIERS_BACKEND = "frugal-tiers"                 # the delegation backend the frugal-tiers plugin registers
+
+
+def _yaml_key(text, section, key):
+    """Raw value of a top-level `section:` -> `key:` in a simple YAML file (stdlib only; None when absent).
+    A block list under the key is returned as a list."""
+    lines = (text or "").splitlines()
+    try:
+        i = next(n for n, ln in enumerate(lines) if re.match(rf"^{re.escape(section)}:\s*(#.*)?$", ln))
+    except StopIteration:
+        return None
+    ind = None
+    for n in range(i + 1, len(lines)):
+        ln = lines[n]
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        cur = len(ln) - len(ln.lstrip())
+        if cur == 0:
+            return None
+        ind = cur if ind is None else ind
+        if cur != ind:
+            continue
+        m = re.match(rf"^\s*{re.escape(key)}:\s*(.*?)\s*(#.*)?$", ln)
+        if not m:
+            continue
+        v = m.group(1)
+        if v:
+            return v.strip("'\"")
+        items = []
+        for ln2 in lines[n + 1:]:
+            if not ln2.strip() or ln2.lstrip().startswith("#"):
+                continue
+            if (len(ln2) - len(ln2.lstrip())) <= ind and not ln2.lstrip().startswith("- "):
+                break
+            if ln2.lstrip().startswith("- "):
+                items.append(ln2.lstrip()[2:].split("#")[0].strip().strip("'\""))
+        return items
+    return None
+
+
+def hermes_backend(home):
+    """delegation.backend in a Hermes-style home's config.yaml ('default' when unset)."""
+    v = _yaml_key(read(os.path.join(home, "config.yaml")), "delegation", "backend")
+    return v if isinstance(v, str) and v else "default"
+
+
+def hermes_plugin_enabled(home, name):
+    v = _yaml_key(read(os.path.join(home, "config.yaml")), "plugins", "enabled")
+    if isinstance(v, str):
+        v = [x.strip().strip("'\"") for x in v.strip("[]").split(",")]
+    return name in (v or [])
+
+
 PROXY_TOOLS = ("codex", "cursor-agent", "opencode", "aider", "goose", "continue", "crush", "amp")
 
 
@@ -161,6 +215,41 @@ class Setup:
             w = self.written = {}
         if os.path.isfile(path):
             w[os.path.abspath(path)] = sha(open(path, "rb").read())
+
+    def copy_plugins(self, home, remember=False):
+        """Copy every Frugal plugin into <home>/plugins/. Returns the frugal-bridge plugin path (registry key)."""
+        for name in PLUGINS:
+            dst = os.path.join(home, "plugins", name)
+            if remember:
+                self.remember_dirs(os.path.join(dst, "x"))
+            self.copy_tree(os.path.join(ROOT, "adapter", "plugin", name), dst)
+        return os.path.join(home, "plugins", PLUGINS[0])
+
+    def remove_plugins(self, first_plugin, written):
+        """Remove our plugin copies (first_plugin = the recorded frugal-bridge path; the others sit beside it)."""
+        kept, pdir = [], os.path.dirname(first_plugin)
+        for name in PLUGINS:
+            kept += self.remove_copy(os.path.join(pdir, name), os.path.join(ROOT, "adapter", "plugin", name), written)
+        return kept
+
+    def restore_backend(self, home, prev):
+        """After the plugin is gone, a delegation.backend still naming it would fail every delegate_task closed:
+        put back the value from before (via the tool's own config command), else print the command."""
+        if hermes_backend(home) != TIERS_BACKEND:
+            return
+        prev = prev if prev and prev != TIERS_BACKEND else "default"
+        cmd = ["hermes", "config", "set", "delegation.backend", prev]
+        ok, exe = False, shutil.which("hermes")
+        if exe:
+            import subprocess
+            try:
+                ok = subprocess.run([exe] + cmd[1:], env={**os.environ, "HERMES_HOME": home}, capture_output=True,
+                                    timeout=120).returncode == 0 and hermes_backend(home) == prev
+            except (OSError, subprocess.SubprocessError):
+                ok = False
+        self.log.append(f"delegation.backend restored to {prev} ({home})" if ok else
+                        f"delegation.backend still names {TIERS_BACKEND}: run  HERMES_HOME={home} {' '.join(cmd)}")
+        self.log.append(f"if you enabled it, also run: hermes plugins disable {TIERS_BACKEND}")
 
     def copy_tree(self, src, dst):
         shutil.copytree(src, dst, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
@@ -299,6 +388,8 @@ class Setup:
                  "written": {**(prev.get("written") or {}), **(getattr(self, "written", None) or {})}}
         if kits_hermes:
             entry["hermes_home"] = kits_hermes
+            bp = prev.get("hermes_backend_prev") or hermes_backend(kits_hermes)
+            entry["hermes_backend_prev"] = bp if bp != TIERS_BACKEND else "default"
         kits["frugal-bridge"] = entry
         self.save_kits(k)
         return self.check(), self.log
@@ -355,13 +446,14 @@ class Setup:
             data.pop("hooks", None)
 
     def install_hermes(self, home):
-        dst = os.path.join(home, "plugins", "frugal-bridge")
-        self.copy_tree(os.path.join(ROOT, "adapter", "plugin", "frugal-bridge"), dst)
+        dst = self.copy_plugins(home)
         cfgp = os.path.join(home, "frugal-bridge", "config.json")
         cfg = json.loads(read(cfgp) or "{}")
         cfg["base_dir"] = self.d
         write(cfgp, json.dumps(cfg, indent=2) + "\n")
         self.log.append(f"hermes plugin copied to {dst}; enable with: hermes plugins enable frugal-bridge (then restart the gateway)")
+        self.log.append(f"tiers plugin copied beside it; per-subagent tiers: hermes plugins enable {TIERS_BACKEND} && "
+                        f"hermes config set delegation.backend {TIERS_BACKEND}")
 
     # ---------------------------------------------------------------- uninstall
     def uninstall(self):
@@ -417,8 +509,9 @@ class Setup:
         # hermes plugin copy (not enabled/disabled here)
         h = me.get("hermes_home")
         if h:
-            kept += self.remove_copy(os.path.join(h, "plugins", "frugal-bridge"), os.path.join(ROOT, "adapter", "plugin", "frugal-bridge"), written)
+            kept += self.remove_plugins(os.path.join(h, "plugins", "frugal-bridge"), written)
             self.log.append("plugin files removed; if you enabled it, also run its disable command")
+            self.restore_backend(h, me.get("hermes_backend_prev"))
 
         # slot files we created: remove only if untouched and no base owns slots
         for rel in sorted(created):
@@ -665,11 +758,10 @@ class GlobalSetup(Setup):
                 # Creating SOUL.md would replace the tool's default identity: only add to an existing one.
                 r.setdefault("needs_user", {})[t] = f
                 self.pending_block = self.core(body)
-                self.remember_dirs(os.path.join(home, "plugins", "frugal-bridge", "x"))
                 self.copy_skills(os.path.join(home, "skills", "frugal-bridge"))
-                dst = os.path.join(home, "plugins", "frugal-bridge")
-                self.copy_tree(os.path.join(ROOT, "adapter", "plugin", "frugal-bridge"), dst)
+                dst = self.copy_plugins(home, remember=True)
                 r.setdefault("copied", {})[t] = {"home": home, "plugin": dst}
+                self.note_backend(r, home)
                 continue
             self._modes = {f: prev.get("mode")} if prev.get("mode") else {}
             existed = os.path.exists(f)
@@ -685,15 +777,21 @@ class GlobalSetup(Setup):
             if t in ("claude-code", "codex"):
                 self.copy_skills(os.path.join(home, "skills"))
             if t == "hermes":
-                self.remember_dirs(os.path.join(home, "plugins", "frugal-bridge", "x"))
                 self.copy_skills(os.path.join(home, "skills", "frugal-bridge"))
-                dst = os.path.join(home, "plugins", "frugal-bridge")
-                self.copy_tree(os.path.join(ROOT, "adapter", "plugin", "frugal-bridge"), dst)
-                tools[t]["plugin"] = dst
+                tools[t]["plugin"] = self.copy_plugins(home, remember=True)
+                self.note_backend(r, home)
         r["version"] = VERSION
         r["written"] = {**(r.get("written") or {}), **(getattr(self, "written", None) or {})}
         write(self.reg_path(), json.dumps(r, indent=2) + "\n")
         return self.check(), self.log
+
+    @staticmethod
+    def note_backend(r, home):
+        """Record delegation.backend from before Frugal (once), so uninstall can put it back."""
+        prev = r.setdefault("hermes_backend_prev", {})
+        if home not in prev:
+            b = hermes_backend(home)
+            prev[home] = b if b != TIERS_BACKEND else "default"
 
     def copy_skills(self, dst_root):
         for sk in sorted(os.listdir(os.path.join(KIT, "skills"))):
@@ -758,8 +856,9 @@ class GlobalSetup(Setup):
                 d_ = os.path.join(home, "skills", "frugal-bridge")
                 if os.path.isdir(d_) and not os.listdir(d_):
                     os.rmdir(d_)
-                kept += self.remove_copy(info.get("plugin") or os.path.join(home, "plugins", "frugal-bridge"), os.path.join(ROOT, "adapter", "plugin", "frugal-bridge"), written)
+                kept += self.remove_plugins(info.get("plugin") or os.path.join(home, "plugins", "frugal-bridge"), written)
                 self.log.append("plugin files removed; if you enabled it, also run its disable command")
+                self.restore_backend(home, (r.get("hermes_backend_prev") or {}).get(home))
             if t == "claude-code":
                 sf = os.path.join(home, "settings.json")
                 st = read(sf)
@@ -774,7 +873,8 @@ class GlobalSetup(Setup):
             d_ = os.path.join(info["home"], "skills", "frugal-bridge")
             if os.path.isdir(d_) and not os.listdir(d_):
                 os.rmdir(d_)
-            kept += self.remove_copy(info["plugin"], os.path.join(ROOT, "adapter", "plugin", "frugal-bridge"), written)
+            kept += self.remove_plugins(info["plugin"], written)
+            self.restore_backend(info["home"], (r.get("hermes_backend_prev") or {}).get(info["home"]))
         for f in ("frugal_hook.py", "global.json"):
             if os.path.exists(os.path.join(self.d, f)):
                 os.remove(os.path.join(self.d, f))
@@ -787,12 +887,24 @@ class GlobalSetup(Setup):
                         f"you changed or added, usage logs, backups in {os.path.join(self.d, 'backup')}")
         return self.log
 
+    @staticmethod
+    def tiers_status(home):
+        copied = os.path.isfile(os.path.join(home, "plugins", TIERS_BACKEND, "__init__.py"))
+        on = hermes_plugin_enabled(home, TIERS_BACKEND)
+        b = hermes_backend(home)
+        state = "on" if copied and on and b == TIERS_BACKEND else "off"
+        return (f"hermes tiers: {state} (plugin {'copied' if copied else 'missing'}, "
+                f"{'enabled' if on else 'not enabled'}, delegation.backend={b})")
+
     def check(self):
         out, ok = [], True
         tools = (self.reg().get("tools") or {})
         for t, f in (self.reg().get("needs_user") or {}).items():
             out.append(f"{t}: needs user — {f} does not exist; not created (it would replace the default identity)")
         if not tools and self.reg().get("needs_user"):
+            for t, info in (self.reg().get("copied") or {}).items():
+                if t == "hermes" and info.get("plugin"):
+                    out.append(self.tiers_status(info["home"]))
             out.insert(0, "OK")
             return "\n".join(out)
         if not tools:
@@ -803,6 +915,9 @@ class GlobalSetup(Setup):
             out.append(f"{t}: {info['file']} block={n} size={b}"); ok &= n == 1
             if b > CODEX_LIMIT:
                 out.append(f"  {info['file']} over 32 KiB: some tools read only the first 32 KiB"); ok = False
+        for t, info in list(tools.items()) + list((self.reg().get("copied") or {}).items()):
+            if t == "hermes" and info.get("plugin"):
+                out.append(self.tiers_status(os.path.dirname(os.path.dirname(info["plugin"]))))
         base = self.reg().get("base")
         if base:
             if not os.path.isdir(base):
@@ -843,6 +958,12 @@ def main_global(argv):
                 print(f"  {t} plugin: copied to {c['plugin']} — enable it to turn it on (restarts that tool's gateway)")
         if "hermes" in tools:
             print(f"  plugin: copied to {tools['hermes'].get('plugin')} — enable it to turn it on (restarts that tool's gateway)")
+        if "hermes" in tools or "hermes" in (g.reg().get("copied") or {}):
+            print(f"  tiers (per-subagent cheap/mid/top models): turn on with")
+            print(f"    hermes plugins enable {TIERS_BACKEND}")
+            print(f"    hermes config set delegation.backend {TIERS_BACKEND}")
+            prev = next(iter((g.reg().get("hermes_backend_prev") or {}).values()), "default")
+            print(f"    undo: hermes config set delegation.backend {prev} && hermes plugins disable {TIERS_BACKEND}")
         proxy = [b for b in PROXY_TOOLS if shutil.which(b)]
         if proxy:
             print(f"  proxy available for: {', '.join(proxy)} — optional, adds enforcement (adapter/proxy/)")

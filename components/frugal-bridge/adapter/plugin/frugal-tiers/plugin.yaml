@@ -1,0 +1,3 @@
+name: frugal-tiers
+version: "0.1.0"
+description: "Frugal-Bridge tiers: delegation backend that adds tier (cheap|mid|top) and effort per subagent; a tier maps to a model of the parent's provider (ROUTING.md). Turn on: hermes config set delegation.backend frugal-tiers"

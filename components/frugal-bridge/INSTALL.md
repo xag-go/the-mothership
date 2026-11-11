@@ -47,6 +47,9 @@ The report ends with "Enforcement on this machine". Three lines may need the use
   the printed block into it).
 - **plugin copied … enable it**: enabling restarts that tool's gateway (running chats pause a few seconds). Ask, then
   run the enable command the tool documents (e.g. `hermes plugins enable frugal-bridge`, then restart its gateway).
+- **tiers … turn on with**: optional, per-helper model tiers for tools with a delegation backend. Ask, then run the two
+  printed commands (e.g. `hermes plugins enable frugal-tiers`, `hermes config set delegation.backend frugal-tiers`);
+  give the user the printed undo line.
 - **proxy available for …**: see step 6.
 
 ## 5. Fill the user file

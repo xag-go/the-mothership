@@ -535,3 +535,133 @@ def test_project_uninstall_never_loses_user_data(tmp_path):
     assert "my rule" in list((p / ".frugal-bridge" / "kept").glob("*AGENTS.md.block.md"))[0].read_text()
     assert not (p / ".claude" / "skills" / "frugal-delegate").exists()
     assert any("your data is kept" in l for l in log)
+
+
+
+# ---------------------------------------------------------------- frugal-tiers (delegation backend plugin)
+FAKE_HERMES = """#!/usr/bin/env python3
+import os, re, sys
+home = os.environ["HERMES_HOME"]
+open(os.path.join(home, "fake-hermes.log"), "a").write(" ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1:4] == ["config", "set", "delegation.backend"]:
+    p = os.path.join(home, "config.yaml"); t = open(p).read()
+    open(p, "w").write(re.sub(r"(?m)^(  backend: ).*$", lambda m: m.group(1) + sys.argv[4], t, count=1))
+"""
+
+
+def _hermes_home_with_config(home, backend="profile_routes", enabled="[frugal-bridge]"):
+    hh = home / ".hermes"; hh.mkdir(exist_ok=True)
+    (hh / "SOUL.md").write_text("You are Kai.\n")
+    cfg = f"model:\n  provider: anthropic\nplugins:\n  enabled: {enabled}\ndelegation:\n  max_iterations: 50\n  backend: {backend}\n"
+    (hh / "config.yaml").write_text(cfg)
+    return hh
+
+
+def _fake_hermes_bin(tmp_path, monkeypatch):
+    b = tmp_path / "bin"; b.mkdir(); exe = b / "hermes"
+    exe.write_text(FAKE_HERMES); exe.chmod(0o755)
+    monkeypatch.setattr(S.shutil, "which", lambda n: str(exe) if n == "hermes" else None)
+    return exe
+
+
+def test_yaml_key_reader():
+    t = "plugins:\n  enabled:\n    - a\n    - frugal-tiers  # mine\n  disabled: []\ndelegation:\n  # c\n  backend: 'x-y'\n  backends:\n    x-y: {}\n"
+    assert S._yaml_key(t, "plugins", "enabled") == ["a", "frugal-tiers"]
+    assert S._yaml_key(t, "delegation", "backend") == "x-y"
+    assert S._yaml_key("delegation:\n  model: m\n", "delegation", "backend") is None
+    assert S._yaml_key("", "delegation", "backend") is None
+
+
+def test_global_copies_tiers_plugin_prints_enable_and_uninstall_byte_identical(tmp_path, monkeypatch, capsys):
+    home = _fake_home(tmp_path, monkeypatch)
+    hh = _hermes_home_with_config(home)
+    before = tree(str(home))
+    assert S.main(["setup.py", "install", "--global", "--hosts", "hermes"]) == 0
+    out = capsys.readouterr().out
+    for f in ("__init__.py", "plugin.yaml", "tiers.json"):
+        assert (hh / "plugins" / "frugal-tiers" / f).exists()
+    assert "hermes plugins enable frugal-tiers" in out and "hermes config set delegation.backend frugal-tiers" in out
+    assert "undo: hermes config set delegation.backend profile_routes" in out
+    assert (hh / "config.yaml").read_text().count("backend: profile_routes") == 1     # config never edited by setup
+    assert "hermes tiers: off (plugin copied, not enabled, delegation.backend=profile_routes)" in S.GlobalSetup().check()
+    reg = json.loads((home / ".frugal-bridge" / "global.json").read_text())
+    assert reg["hermes_backend_prev"] == {str(hh): "profile_routes"}
+    snap = tree(str(home))
+    assert S.main(["setup.py", "install", "--global", "--hosts", "hermes"]) == 0       # re-run: identical
+    assert strip_dirs(tree(str(home))) == strip_dirs(snap)
+    assert S.main(["setup.py", "uninstall", "--global"]) == 0
+    after = strip_dirs(tree(str(home)))
+    assert after.pop(".frugal-bridge/USER.md")                                     # the user's file is kept (data)
+    assert after == strip_dirs(before)
+    assert not (hh / "plugins").exists()
+
+
+def test_global_uninstall_restores_previous_backend(tmp_path, monkeypatch, capsys):
+    home = _fake_home(tmp_path, monkeypatch)
+    hh = _hermes_home_with_config(home)
+    original = (hh / "config.yaml").read_bytes()
+    assert S.main(["setup.py", "install", "--global", "--hosts", "hermes"]) == 0
+    # the user's turn-on step (what `hermes plugins enable` + `hermes config set` do)
+    (hh / "config.yaml").write_text(original.decode().replace("[frugal-bridge]", "[frugal-bridge, frugal-tiers]")
+                                    .replace("backend: profile_routes", "backend: frugal-tiers"))
+    assert "hermes tiers: on (plugin copied, enabled, delegation.backend=frugal-tiers)" in S.GlobalSetup().check()
+    assert S.main(["setup.py", "install", "--global", "--hosts", "hermes"]) == 0       # re-run keeps the first prev
+    assert json.loads((home / ".frugal-bridge" / "global.json").read_text())["hermes_backend_prev"][str(hh)] == "profile_routes"
+    exe = _fake_hermes_bin(tmp_path, monkeypatch)
+    capsys.readouterr()
+    assert S.main(["setup.py", "uninstall", "--global"]) == 0
+    out = capsys.readouterr().out
+    assert (hh / "fake-hermes.log").read_text() == "config set delegation.backend profile_routes\n"
+    assert "delegation.backend restored to profile_routes" in out and "hermes plugins disable frugal-tiers" in out
+    assert "backend: profile_routes" in (hh / "config.yaml").read_text()
+    assert not (hh / "plugins" / "frugal-tiers").exists()
+
+
+def test_global_uninstall_leaves_other_backend_alone(tmp_path, monkeypatch):
+    home = _fake_home(tmp_path, monkeypatch)
+    hh = _hermes_home_with_config(home, backend="default")
+    assert S.main(["setup.py", "install", "--global", "--hosts", "hermes"]) == 0
+    (hh / "config.yaml").write_text((hh / "config.yaml").read_text().replace("backend: default", "backend: my-own"))
+    _fake_hermes_bin(tmp_path, monkeypatch)
+    assert S.main(["setup.py", "uninstall", "--global"]) == 0
+    assert not (hh / "fake-hermes.log").exists()                                # user switched away: not touched
+    assert "backend: my-own" in (hh / "config.yaml").read_text()
+
+
+def test_global_uninstall_without_hermes_binary_prints_command(tmp_path, monkeypatch, capsys):
+    home = _fake_home(tmp_path, monkeypatch)
+    hh = _hermes_home_with_config(home, backend="default")
+    assert S.main(["setup.py", "install", "--global", "--hosts", "hermes"]) == 0
+    (hh / "config.yaml").write_text((hh / "config.yaml").read_text().replace("backend: default", "backend: frugal-tiers"))
+    capsys.readouterr()
+    assert S.main(["setup.py", "uninstall", "--global"]) == 0
+    out = capsys.readouterr().out
+    assert f"HERMES_HOME={hh} hermes config set delegation.backend default" in out
+
+
+def test_global_hermes_without_soul_still_copies_tiers(tmp_path, monkeypatch):
+    home = _fake_home(tmp_path, monkeypatch)
+    hh = home / ".hermes"; hh.mkdir()
+    before = tree(str(home))
+    assert S.main(["setup.py", "install", "--global", "--hosts", "hermes"]) == 0
+    assert (hh / "plugins" / "frugal-tiers" / "tiers.json").exists() and not (hh / "SOUL.md").exists()
+    assert "hermes tiers: off" in S.GlobalSetup().check()
+    assert S.main(["setup.py", "uninstall", "--global"]) == 0
+    after = strip_dirs(tree(str(home)))
+    after.pop(".frugal-bridge/USER.md", None)
+    assert after == strip_dirs(before)
+
+
+def test_project_install_copies_and_removes_tiers_plugin(tmp_path):
+    proj, hh = tmp_path / "p", tmp_path / "hh"; proj.mkdir(); hh.mkdir()
+    inst(proj, hosts=("hermes",), hermes_home=str(hh))
+    assert (hh / "plugins" / "frugal-tiers" / "__init__.py").exists()
+    S.Setup(str(proj)).uninstall()
+    assert not (hh / "plugins" / "frugal-tiers").exists()
+
+
+def test_rules_tell_agents_to_pass_the_tier_model():
+    a = open(os.path.join(HERE, "AGENTS.md")).read()
+    sk = open(os.path.join(HERE, "skills", "frugal-delegate", "SKILL.md")).read()
+    for t in (a, sk):
+        assert "haiku" in t and "sonnet" in t and "opus" in t and "tier" in t

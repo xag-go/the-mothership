@@ -7,7 +7,7 @@ makes the parts a prompt cannot guarantee happen automatically. `kit/setup.py` p
 | What the tool allows | What the adapter uses | Enforced |
 |---|---|---|
 | Session / prompt hooks | `hooks/` (one small script) | context watch, start files |
-| Plugins | `plugin/` | context watch, start files, big-output filter, usage report |
+| Plugins | `plugin/` | context watch, start files, big-output filter, usage report; model tier per helper (delegation backend) |
 | A configurable API base URL (any provider) | `proxy/` (local, standard library only) | context watch, loop guard, output filter, start files, rules injection, usage report |
 | None of these (chat apps) | — | the rules are pasted as project instructions: followed, not enforced |
 
@@ -55,7 +55,35 @@ session itself. Examples — Anthropic-format tools: `ANTHROPIC_BASE_URL=http://
 OpenAI-compatible tools: base URL `http://127.0.0.1:8790/openai/v1` (or `/openrouter/v1`, `/gemini/v1beta/openai`);
 a ChatGPT-login CLI (Codex): `-c model_provider=fb -c 'model_providers.fb={name="fb",base_url="http://127.0.0.1:8790/chatgpt",wire_api="responses",requires_openai_auth=true}'`.
 
+## Model tier per helper (cheap / mid / top)
+The rule "checkable work goes to a cheap helper" only takes effect where the agent can pick a model per helper.
+Setup gives each tool the strongest way it allows:
+
+| What the tool allows | How the tier reaches the helper | Enforced |
+|---|---|---|
+| A delegation-backend plugin (e.g. Hermes Agent) | `plugin/frugal-tiers/`: adds `tier` (cheap/mid/top) and `effort` (low/medium/high) to the delegate tool; the tier maps to a model of the parent's provider family | yes: the backend sets the child's model |
+| A subagent tool with a `model` field (e.g. Claude Code) | the rules and the `frugal-delegate` skill tell the agent to pass the tier's model (Claude: haiku / sonnet / opus) | the tool runs the model the agent passes; the choice is the agent's |
+| Neither (e.g. Codex, other CLIs) | rules only: the helper runs on the agent's model, and the agent says so | no; for a fixed cheaper model per tool, point it at `proxy/` and set the model there, or start the helper as a separate agent on that model |
+| Chat apps | rules only | no |
+
+**`plugin/frugal-tiers/`** (a Hermes-style delegation provider, `delegation.backend: frugal-tiers`). The table comes
+from `kit/ROUTING.md` as `tiers.json` (regenerate: `python3 plugin/frugal-tiers/__init__.py --regen ../kit/ROUTING.md`;
+a test fails when the two differ). Family = the parent's provider (`anthropic` → `claude-haiku-5-5` style ids;
+`openai`/`openai-codex`; `gemini`) or the vendor of a `vendor/model` id on an aggregator (OpenRouter-style →
+`anthropic/claude-haiku-5.5`). The parent is the `delegation` pin when set, else the configured main model
+(`model.provider` / `model.default`; a mid-session model switch is not seen). No tier = the default route (as before).
+A family or tier missing from the table = the default route with a label note; an unknown tier or effort refuses that
+task. Effort: the tier's ROUTING.md default (medium) unless the task sets `effort`. Overrides per tier in
+`delegation.backends.frugal-tiers`: `cheap: {model: ...}` (same provider) or `{provider: ..., model: ..., effort: ...}`.
+Setup copies it with the other plugin; turning it on is the user's step:
+`hermes plugins enable frugal-tiers` and `hermes config set delegation.backend frugal-tiers`. Undo:
+`hermes config set delegation.backend <previous value>` and `hermes plugins disable frugal-tiers`. `uninstall --global`
+removes only its files and, when `delegation.backend` still names it, puts the value recorded at install back (with
+the tool's own `config set`; without the binary it prints the command), because a backend whose plugin is gone fails
+every delegation closed. `check --global` shows `hermes tiers: on|off (...)`.
+
 ## Tests
-`python3 -m pytest -q adapter kit` — hooks, plugin (also loaded through a real plugin manager), proxy (fake
-upstream), setup. Real runs: an agent installed everything from one sentence and a new session loaded the rules; a
+`python3 -m pytest -q adapter kit` — hooks, plugin (also loaded through a real plugin manager), tiers (every family,
+overrides, inherit cases, table in sync, loaded through the installed Hermes plugin loader and delegation registry when
+present), proxy (fake upstream), setup. Real runs: an agent installed everything from one sentence and a new session loaded the rules; a
 coding agent ran through the proxy with the context notice and loop guard working and the cache intact.

@@ -10,6 +10,8 @@ description: "Use when sending work to a helper. Picks the tier, writes the brie
    - public English writing → mid, high; data memos, partner thinking → mid, medium;
    - decisions, plans, architecture, Darija or other hard languages → top, medium (often: do it yourself);
    - never low effort for real work; no xhigh/max.
+   - set it on the call: a `model` field gets the tier's model (Claude: haiku / sonnet / opus), a `tier` field gets
+     cheap / mid / top (plus `effort` when offered); no such field = the helper runs on your model, say so.
 2. Large inputs: write them to a file first; pass the path, not the text.
 3. Brief (templates/BRIEF.md): goal + done-criteria, exact input paths, tools allowed, tier/effort, output =
    ≤10-line summary + full result written to a path.
