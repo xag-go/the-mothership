@@ -2,7 +2,7 @@
 
 ## v1.0.1 (2026-11-11)
 
-- Skeleton Base 1.3.2 (`ef24388`) vendored from GitHub; Frugal-Bridge 6 (`c2841b1`) unchanged.
+- Skeleton Base 1.3.2 (`d036212`) vendored from GitHub; Frugal-Bridge 6 (`c2841b1`) unchanged.
 - A tool installed later gets both blocks (base first) from the watcher alone: Skeleton Base 1.3.2 runs
   Frugal-Bridge's `install --global --hosts TOOL` for it.
 - Adopting an existing base never downgrades it: a base whose Skeleton Base release is newer than the vendored one

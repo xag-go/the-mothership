@@ -97,7 +97,7 @@ parts are never removed by `uninstall`.
 ## 5. Limits
 
 - Base path with spaces: Skeleton Base 1.3.2 quotes it everywhere (`Path: "..."`, shell commands, systemd
-  units). The vendored Frugal-Bridge 6 reads the `Path:` line only up to the first space, so with Frugal-Bridge the
+  units). The vendored Frugal-Bridge 6 (`c2841b1`) reads the `Path:` line only up to the first space, so with Frugal-Bridge the
   installer refuses such a path (nothing written); `--no-frugal` installs it. The check looks at the Frugal-Bridge
   kit itself (a version that reads quoted paths has `parse_base_path`), so a re-vendored Frugal lifts it.
 - `systemctl` parts run only where `systemctl --user` works. No launchd agent.
