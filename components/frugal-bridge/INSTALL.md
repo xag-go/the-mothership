@@ -36,6 +36,7 @@ Setup finds the agent tools on this machine by itself and installs in the strong
 the tool's own user-level instruction file, plus hooks, skills or a plugin where the tool has them. The report must
 start with `OK`; if it says `PROBLEMS`, show the lines to the user and stop. It never overwrites the user's text, and
 if a settings file is not valid JSON it stops without changing it — tell the user, don't "fix" their file.
+If the user has a knowledge base that setup did not find, re-run with `--base <its folder>`.
 If it finds no agent tool, ask the user which one they use and re-run with `--hosts <name>`
 (`claude-code, codex, gemini, opencode, hermes`).
 

@@ -351,8 +351,8 @@ class InstallTests(Base):
         self.assertIn("checks: all OK", self.ms("--yes", "--no-frugal", "--base", base, repo=repo))
 
     def test_hermes_without_soul_md_stays_without_it(self):
-        """A Hermes home with no SOUL.md keeps its default identity: Frugal-Bridge never creates SOUL.md, and
-        install + uninstall leave the home byte-identical."""
+        """A Hermes home with no SOUL.md keeps its default identity: Frugal-Bridge never creates SOUL.md, still
+        uses the base (found from the base's pointer file), and install + uninstall leave the home byte-identical."""
         hermes = self.home / ".hermes"
         hermes.mkdir()
         (hermes / "config.yaml").write_text("model: default\n")
@@ -362,6 +362,12 @@ class InstallTests(Base):
                 out = self.ms("--yes", **env)
                 self.assertIn("checks: all OK", out)
                 self.assertFalse((hermes / "SOUL.md").exists(), out)
+                # no tool rules file carries the base block here: Frugal-Bridge finds the base from its pointer
+                # file / systemd units, so there is no second user file
+                self.assertEqual((self.home / ".config/skeleton-base/base").read_text(), f"{self.base}\n")
+                self.assertEqual(json.loads((self.home / ".frugal-bridge/global.json").read_text()).get("base"),
+                                 str(self.base), out)
+                self.assertFalse((self.home / ".frugal-bridge/USER.md").exists(), "second user file")
                 self.ms("check", **env)
                 self.ms("uninstall", **env)
                 self.assertFalse((hermes / "SOUL.md").exists())
@@ -572,7 +578,7 @@ class CheckStatusTests(Base):
         self.assertEqual(s1, s2)
         lock = json.loads((REPO / "components.lock").read_text())["components"]
         self.assertEqual(s1.splitlines()[:4], [
-            "The Mothership 1.0.2", f"base: {self.base}",
+            "The Mothership 1.0.3", f"base: {self.base}",
             f"component frugal-bridge: {lock['frugal-bridge']['version']} @ {lock['frugal-bridge']['commit']}",
             f"component skeleton-base: {lock['skeleton-base']['version']} @ {lock['skeleton-base']['commit']}"])
         self.assertIn("connected: ~/.claude/CLAUDE.md", s1)

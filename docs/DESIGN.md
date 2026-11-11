@@ -96,13 +96,16 @@ parts are never removed by `uninstall`.
 
 ## 5. Limits
 
-- Base path with spaces: Skeleton Base 1.3.2 quotes it everywhere (`Path: "..."`, shell commands, systemd
-  units) and the vendored Frugal-Bridge 6 (`a84e5ec`) reads the quoted `Path:` line (`parse_base_path`), so it
+- Base path with spaces: Skeleton Base (1.3.2+) quotes it everywhere (`Path: "..."`, shell commands, systemd
+  units) and the vendored Frugal-Bridge 6 (since `a84e5ec`) reads the quoted `Path:` line (`parse_base_path`), so it
   installs with both. The installer still refuses such a path (nothing written) when a Frugal-Bridge kit it would
   use lacks `parse_base_path` (an older vendored copy, or an adopted older user kit), because that one reads the
   path only up to the first space; `--no-frugal` then installs it.
-- Hermes without `SOUL.md`: Frugal-Bridge `a84e5ec` never creates it (it would replace Hermes' default identity);
-  its rules for Hermes wait until the user writes one, and uninstall leaves the Hermes folder as it was.
+- Hermes without `SOUL.md`: Frugal-Bridge (since `a84e5ec`) never creates it (it would replace Hermes' default
+  identity); its rules for Hermes wait until the user writes one, and uninstall leaves the Hermes folder as it was.
+  Frugal-Bridge `4920444` still uses the base there: with no rules file carrying the base block it finds the base
+  from Skeleton Base's pointer file `~/.config/skeleton-base/base` (written by `connect` since 1.3.3) or its systemd
+  units, so there is no second user file.
 - `systemctl` parts run only where `systemctl --user` works. No launchd agent.
 - A tool installed later: the watcher writes the base pointer and runs Frugal-Bridge's `install --global --hosts
   TOOL` for that tool alone (Skeleton Base 1.3.2), so it gets both blocks without another `install.py` run.

@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.3 (2026-11-11)
+
+- Skeleton Base 1.3.3 (`7dac9eb`) and Frugal-Bridge 6 (`4920444`) vendored from GitHub (were `d036212` and
+  `a84e5ec`); nothing excluded.
+- Frugal-Bridge finds the base without a tool rules file (`--base`, the base's pointer file
+  `~/.config/skeleton-base/base`, its systemd units): a home whose only tool is Hermes without `SOUL.md` now has one
+  user file, the base. Skeleton Base writes and removes the pointer file with `connect` / `disconnect`.
+- Skeleton Base `disconnect` (when Frugal-Bridge still uses the base) removes everything Frugal-Bridge could find
+  it from, then makes it forget the base and re-runs it, so it really goes back to its own user file.
+- Tests: 44 (43 by default + the opt-in real Claude Code test); the Hermes-without-`SOUL.md` test now also checks
+  the pointer file and that Frugal-Bridge uses the base (no `~/.frugal-bridge/USER.md`).
+
 ## v1.0.2 (2026-11-11)
 
 - Frugal-Bridge 6 (`a84e5ec`) vendored from GitHub (was `c2841b1`); Skeleton Base 1.3.2 (`d036212`) unchanged.

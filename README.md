@@ -54,6 +54,7 @@ continues. If a step fails on a first install, everything it did is undone.
 | a pointer to the base + Frugal-Bridge rules in each AI tool's user-level rules file | `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`, and others that exist (Qwen Code, opencode, Windsurf, Kiro, OpenClaw, Hermes): each product only adds its own marked block, your text stays as it is |
 | Claude Code hooks (collect memories at session end, Frugal-Bridge context watch) and read access to the base from any folder | merged into `~/.claude/settings.json` (your keys and hooks are kept) |
 | Frugal-Bridge user-level files | `~/.frugal-bridge/` (`FRUGAL_HOME` moves it): its hook and `global.json`. Your profile lives in the base (`wiki/me/`), so there is no second user file |
+| the base's pointer file (other kits find the base there, even when no tool rules file names it) | `~/.config/skeleton-base/base`: one line, the base folder |
 | watcher + daily collect (Linux) | `~/.config/systemd/user/skeleton-base-watch.service`, `skeleton-base-collect.timer`; with `--yes` they are enabled when `systemctl --user` works, otherwise the command to enable them is printed |
 | a stable copy of The Mothership (so you can delete the clone) | `~/.local/share/the-mothership/` (`XDG_DATA_HOME` or `MOTHERSHIP_HOME` move it) |
 | the install record | `~/skeleton-base-home/.mothership.json` |

@@ -101,5 +101,7 @@ Related: base-folder-design §23, base-folder-test-results.
 ## User-level (global) install
 When either kit is installed for the user instead of one folder, the same contract holds in the tools' user-level
 files (e.g. `~/.claude/CLAUDE.md`): one marked block each, the base block first. Frugal finds a connected base from
-its block (`Path: <dir>`) and uses the base's slots — no second user file. If Frugal was installed first, re-running
+its block (`Path: <dir>`, quoted paths with spaces accepted), from the base's pointer file
+(`~/.config/skeleton-base/base`) or its systemd user units (`--base <dir>`), or from `--base DIR` / `FRUGAL_BASE` —
+so it works even when no tool rules file carries the base block — and uses the base's slots: no second user file. If Frugal was installed first, re-running
 its setup switches it to the base and asks the user to move the old `~/.frugal-bridge/USER.md` content into the base.

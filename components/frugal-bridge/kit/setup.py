@@ -3,7 +3,7 @@
 (docs/COEXISTENCE.md): marked blocks only, `.kits.json` registry, slots owned by a base folder when
 present, key-level JSON merge for host settings, idempotent, reversible, backups of every touched file.
 
-  python3 setup.py install   --global [--hosts auto|claude-code,codex,gemini,opencode,hermes]   (every project)
+  python3 setup.py install   --global [--hosts auto|claude-code,codex,gemini,opencode,hermes] [--base DIR]   (every project)
   python3 setup.py uninstall --global
   python3 setup.py check     --global
   python3 setup.py install   <dir> [--hosts auto|claude-code,gemini,hermes,none] [--hermes-home PATH]   (one folder)
@@ -453,18 +453,51 @@ def parse_base_path(raw):
     return raw
 
 
-def find_base(files):
-    """A knowledge base connected at user level writes 'Path: <dir>' in its block; it owns the slots."""
+def is_base(d):
+    k = read(os.path.join(d, ".kits.json")) if d else None
+    try:
+        return bool(k) and "base-folder" in json.loads(k).get("kits", {})
+    except (json.JSONDecodeError, AttributeError):
+        return False
+
+
+def unit_base_paths(home):
+    """--base <dir> from the base's own systemd user units (its registry when no tool rules file carries a block)."""
+    import shlex
+    d = os.path.join(home, ".config", "systemd", "user")
+    out = []
+    for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        if not (f.startswith("skeleton-base") and f.endswith(".service")):
+            continue
+        for line in (read(os.path.join(d, f)) or "").splitlines():
+            if line.startswith("ExecStart="):
+                try:
+                    w = shlex.split(line[len("ExecStart="):].replace("%%", "%").replace("$$", "$"))
+                except ValueError:
+                    continue
+                if "--base" in w and w.index("--base") + 1 < len(w):
+                    out.append(w[w.index("--base") + 1])
+    return out
+
+
+def find_base(files, home=None, extra=()):
+    """The connected knowledge base, which owns the user's slots. Sources, in order: `extra` (--base, FRUGAL_BASE,
+    a base recorded earlier), the 'Path:' line of its block in any tool rules file, its pointer file
+    (~/.config/skeleton-base/base), its systemd user units (--base <dir>). Each candidate must have a .kits.json
+    registering `base-folder`."""
+    cands = [c for c in extra if c]
     for f in files:
         m = BASE_PATH_RE.search(read(f) or "")
         if m:
-            d = os.path.expanduser(parse_base_path(m.group(1)))
-            k = read(os.path.join(d, ".kits.json"))
-            try:
-                if k and "base-folder" in json.loads(k).get("kits", {}):
-                    return d
-            except json.JSONDecodeError:
-                pass
+            cands.append(parse_base_path(m.group(1)))
+    if home:
+        ptr = (read(os.path.join(home, ".config", "skeleton-base", "base")) or "").strip().splitlines()
+        cands += ptr[:1]
+        cands += unit_base_paths(home)
+    for c in cands:
+        d = os.path.abspath(os.path.expanduser(c))
+        if is_base(d):
+            return d
     return None
 
 
@@ -509,7 +542,8 @@ class GlobalSetup(Setup):
         targets = global_targets()
         hosts = [h for h in (hosts or self.detect()) if h in targets]
         user = os.path.join(self.d, "USER.md")
-        base = find_base([os.path.join(targets[t][0], targets[t][1]) for t in targets])
+        base = find_base([os.path.join(targets[t][0], targets[t][1]) for t in targets], os.path.expanduser("~"),
+                         (getattr(self, "base_arg", None), os.environ.get("FRUGAL_BASE"), r.get("base")))
         rules = open(os.path.join(KIT, "AGENTS.md")).read() + "\n\n" + open(os.path.join(KIT, "ROUTING.md")).read() + "\n"
         if base:  # coexistence contract: the base owns the slots, Frugal never makes a second copy
             sl = json.loads(read(os.path.join(base, ".kits.json"))).get("slots") or {}
@@ -644,6 +678,11 @@ class GlobalSetup(Setup):
 
 def main_global(argv):
     g = GlobalSetup()
+    if "--base" in argv:
+        g.base_arg = os.path.abspath(os.path.expanduser(argv[argv.index("--base") + 1]))
+        if not is_base(g.base_arg):
+            print(f"--base {g.base_arg}: no knowledge base there (.kits.json without base-folder); nothing changed")
+            return 2
     hosts = None
     if "--hosts" in argv and argv[argv.index("--hosts") + 1] != "auto":
         hosts = argv[argv.index("--hosts") + 1].split(",")

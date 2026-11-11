@@ -390,3 +390,54 @@ def test_public_license_and_docs_have_no_org_names():
     org = "x" + "ag-" + "go"      # spelled in parts so the public export carries no org name
     assert "Copyright (c) 2026 Frugal-Bridge contributors" in lic and org[:3] not in lic.lower()
     assert org not in open(os.path.join(src, "README.md")).read()
+
+
+def _bare_base(path):
+    (path / "wiki" / "me").mkdir(parents=True)
+    (path / "hot.md").write_text("now")
+    (path / ".kits.json").write_text(json.dumps({"kits": {"base-folder": {}}, "slots": {"user": "wiki/me/", "now": "hot.md"}}))
+    return path
+
+
+def _check_uses_base(home, b, tmp_path):
+    assert not (home / ".frugal-bridge" / "USER.md").exists()
+    assert json.loads((home / ".frugal-bridge" / "global.json").read_text())["base"] == str(b)
+    import sys, importlib; sys.path.insert(0, os.path.join(S.ROOT, "adapter", "hooks"))
+    import frugal_hook; importlib.reload(frugal_hook)
+    p = tmp_path / "proj"; p.mkdir(exist_ok=True)
+    got = frugal_hook.slots(str(p))
+    assert got["now"] == str(b / "hot.md") and got["user"].startswith(str(b / "wiki" / "me"))
+
+
+def test_global_hermes_only_base_from_units(tmp_path, monkeypatch):
+    home = _fake_home(tmp_path, monkeypatch)
+    (home / ".hermes").mkdir()                                  # the only tool, no SOUL.md
+    b = _bare_base(tmp_path / "My Base")                         # space in the path
+    u = home / ".config" / "systemd" / "user"; u.mkdir(parents=True)
+    (u / "skeleton-base-watch.service").write_text(
+        f'[Service]\nExecStart=/usr/bin/env python3 -S "{b}/tools/brain.py" watch --base "{b}"\n')
+    assert S.main(["setup.py", "install", "--global"]) == 0
+    _check_uses_base(home, b, tmp_path)
+    assert not (home / ".hermes" / "SOUL.md").exists()
+    assert S.main(["setup.py", "install", "--global"]) == 0     # re-run keeps the recorded base
+    _check_uses_base(home, b, tmp_path)
+
+
+def test_global_base_from_pointer_file_and_flag(tmp_path, monkeypatch):
+    home = _fake_home(tmp_path, monkeypatch)
+    (home / ".hermes").mkdir()
+    b = _bare_base(tmp_path / "kb")
+    (home / ".config" / "skeleton-base").mkdir(parents=True)
+    (home / ".config" / "skeleton-base" / "base").write_text(str(b) + "\n")
+    assert S.main(["setup.py", "install", "--global"]) == 0
+    _check_uses_base(home, b, tmp_path)
+
+
+def test_global_base_flag(tmp_path, monkeypatch):
+    home = _fake_home(tmp_path, monkeypatch)
+    (home / ".hermes").mkdir()
+    b = _bare_base(tmp_path / "kb2")
+    assert S.main(["setup.py", "install", "--global", "--base", str(tmp_path / "nothing")]) == 2
+    assert not (home / ".frugal-bridge").exists()
+    assert S.main(["setup.py", "install", "--global", "--base", str(b)]) == 0
+    _check_uses_base(home, b, tmp_path)

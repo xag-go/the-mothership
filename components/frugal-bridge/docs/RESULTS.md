@@ -824,3 +824,11 @@ Readings:
 - Base `Path:` parser: accepts `backtick`, "double" or 'single' quoted paths with spaces, else the rest of the line;
   old format unchanged.
 - Tests 63/63 (+ SOUL not created / created later / profile home, + 6 path formats, + license/README check).
+
+### 2.31 Finding the base without a tool rules file (2026-11-11)
+- Gap (review): with Hermes (no SOUL.md) as the only tool, `install --global` saw no base block and made a second
+  user file. Fix: base sources in order — `--base DIR` / `FRUGAL_BASE` / base recorded earlier, the `Path:` line in any
+  tool rules file, the base pointer file `~/.config/skeleton-base/base`, the base's systemd user units
+  (`--base <dir>`, systemd quoting). Each must have `.kits.json` with `base-folder`; a bad `--base` stops with no change.
+- Tests 66/66 (+ Hermes-only home with base found from units, path with a space, re-run; + pointer file; + flag).
+  Read-only check on this server: units → the real base found.
