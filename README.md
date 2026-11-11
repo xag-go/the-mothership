@@ -1,0 +1,129 @@
+# The Mothership
+
+One install that gives every AI tool on your computer the same memory and the same thrifty habits.
+
+It brings together two separate open-source products and sets them up to work with each other:
+
+- **Skeleton Base**: your knowledge base ("second brain"), a plain
+  folder of Markdown files. Every AI tool you use reads it to know who you are and what you are working on, and
+  saves what it learns there.
+- **Frugal-Bridge**: short rules (and small hooks) that make AI tools
+  use fewer tokens without doing worse work.
+
+Both live in their own repositories next to this one (same GitHub owner); a copy of each, pinned to one commit,
+is inside this repository under `components/`. Python 3.10+ standard library only. No account, no server, no package installs, no network needed to install.
+Linux and macOS.
+
+## Quick start
+
+```sh
+git clone <this repository's URL> the-mothership
+python3 the-mothership/install.py --yes
+```
+
+That is all. Then:
+
+1. Open `~/skeleton-base-home/hot.md` (what matters now) and `~/skeleton-base-home/maps/brain.html` (a mind map of
+   your base, opens in any browser, works offline).
+2. Ask any AI tool, in any folder: *"interview me and fill wiki/me/, one question at a time"*.
+
+Without `--yes` it asks where the base should live (default `~/skeleton-base-home`) and whether to start the
+background watcher. `--dry-run` shows the plan and writes nothing.
+
+```sh
+python3 the-mothership/install.py --base ~/notes/brain     # another folder for the base (no spaces in the path)
+python3 the-mothership/install.py --no-frugal              # only the knowledge base
+python3 the-mothership/install.py --no-watch [--timer]     # no watcher service (or only a daily timer)
+python3 the-mothership/install.py --verbose                # also show both products' own output
+```
+
+Running it again changes nothing (byte for byte). If an install is interrupted, run the same command again: it
+continues. If a step fails on a first install, everything it did is undone.
+
+## What gets installed where
+
+| what | where |
+|---|---|
+| your knowledge base (Skeleton Base) | `~/skeleton-base-home/` (or `--base DIR`) |
+| Frugal-Bridge rules for that folder | inside the base's `AGENTS.md`, in its own marked block after the base block |
+| a pointer to the base + Frugal-Bridge rules in each AI tool's user-level rules file | `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`, and others that exist (Qwen Code, opencode, Windsurf, Kiro, OpenClaw, Hermes): each product only adds its own marked block, your text stays as it is |
+| Claude Code hooks (collect memories at session end, Frugal-Bridge context watch) and read access to the base from any folder | merged into `~/.claude/settings.json` (your keys and hooks are kept) |
+| Frugal-Bridge user-level files | `~/.frugal-bridge/` (`FRUGAL_HOME` moves it): its hook and `global.json`. Your profile lives in the base (`wiki/me/`), so there is no second user file |
+| watcher + daily collect (Linux) | `~/.config/systemd/user/skeleton-base-watch.service`, `skeleton-base-collect.timer`; with `--yes` they are enabled when `systemctl --user` works, otherwise the command to enable them is printed |
+| a stable copy of The Mothership (so you can delete the clone) | `~/.local/share/the-mothership/` (`XDG_DATA_HOME` or `MOTHERSHIP_HOME` move it) |
+| the install record | `~/skeleton-base-home/.mothership.json` |
+
+On macOS the watcher is skipped and said so; the session hooks still collect, and
+`python3 ~/skeleton-base-home/tools/brain.py watch` runs the watcher by hand.
+
+Already have a Skeleton Base or Frugal-Bridge? They are found and **adopted**, never installed twice. A
+Frugal-Bridge profile (`~/.frugal-bridge/USER.md`) is merged into `wiki/me/` (nothing is overwritten; anything
+unclear lands on a review card in `board/`).
+
+## Check, status, update
+
+```sh
+python3 ~/.local/share/the-mothership/payload/install.py check    # every check; names each problem; exit 1 on any
+python3 ~/.local/share/the-mothership/payload/install.py status   # what is installed, versions, connected tools
+```
+
+`check` runs both products' own checks, `brain.py lint`, and its own: one base block and one Frugal-Bridge block
+per rules file (base first), Frugal-Bridge uses the base as its only user file, the watcher is running, and the
+vendored files match `components.lock`. Lint also checks your own pages (front matter, links): it may ask you to
+run `python3 tools/brain.py index` in the base after you add pages.
+
+Update to a newer version: get the new version of this repository (`git pull`), then
+
+```sh
+python3 the-mothership/install.py update
+```
+
+It applies the new Skeleton Base and Frugal-Bridge versions to your install with your earlier choices. Your pages,
+sources, cards and edited files are left alone; product files you never changed are upgraded.
+
+## Uninstall
+
+```sh
+python3 ~/.local/share/the-mothership/payload/install.py uninstall
+```
+
+It undoes everything in reverse order, using each product's own uninstall, and gives your files back byte for
+byte: rules files, settings (including their original layout), systemd units, folders it created, and the backup
+copies the products made along the way (`--keep-backups` keeps those). Pages you wrote stay in the base folder.
+To delete the base with everything in it: `uninstall --purge` (it asks you to type the folder path;
+non-interactive: `--purge --confirm-purge ~/skeleton-base-home`). Anything that was there before The Mothership
+(an adopted base or Frugal-Bridge) stays installed.
+
+## FAQ
+
+**Does it work with my AI tool?** Yes, with any tool, model or provider. Tools that read a user-level rules file
+get the pointer automatically. A tool you install later is connected to the base by the watcher; run
+`install.py` again to give it the Frugal-Bridge rules too. Tools that only take
+pasted instructions (chat apps): run `python3 ~/skeleton-base-home/tools/brain.py brief` and paste the output. No
+tool or agent name is required anywhere.
+
+**Does anything leave my machine?** No. The install needs no network, nothing calls home, and the base is plain
+files in a folder you own. Your AI tools read it the same way they read any file you show them.
+
+**Why is everything vendored?** So the install is offline, reproducible, and checked: `components.lock` holds the
+commit and a hash of every file of both products, and the installer refuses to run if anything differs. See
+[docs/DESIGN.md](docs/DESIGN.md).
+
+**Can I use the products without The Mothership?** Yes. Both are standalone; The Mothership only runs their own
+setups in the right order.
+
+## For maintainers
+
+```sh
+python3 -m unittest -v                                # the whole suite (isolated temp HOMEs; touches nothing real)
+MOTHERSHIP_BLOCKED_WORDS=~/my-words.txt python3 -m unittest tests.test_mothership.PublicTests
+MOTHERSHIP_REAL_CLAUDE=1 python3 -m unittest tests.test_mothership.RealToolTests   # real `claude -p` cold start
+python3 tools/update-components.py                    # re-vendor both from GitHub, rewrite components.lock
+MOTHERSHIP_BLOCKED_WORDS=~/my-words.txt python3 tools/update-components.py   # leave out upstream files with those words
+python3 tools/update-components.py --check            # verify the vendored files
+```
+
+The suite also runs both products' own test suites from the vendored copies (Frugal-Bridge's pytest-style tests
+through `tests/pytest_adapter.py`, no pytest needed).
+
+License: MIT (same as both components). See [CHANGELOG.md](CHANGELOG.md).
