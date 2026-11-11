@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.0.2 (2026-11-11)
+
+- Frugal-Bridge 6 (`a84e5ec`) vendored from GitHub (was `c2841b1`); Skeleton Base 1.3.2 (`d036212`) unchanged.
+- Frugal-Bridge ships complete: its `README.md`, `LICENSE` (MIT notice) and `docs/DESIGN.md` are no longer left
+  out (`excluded` is empty for both components). `LICENSE` and `README.md` name both components' own MIT licenses.
+- Base paths with spaces now work with Frugal-Bridge too: the vendored one reads the quoted `Path:` line. The
+  installer still refuses such a path, before writing anything, when the Frugal-Bridge kit it would use has no
+  `parse_base_path` (older kit).
+- A Hermes folder without `SOUL.md` stays without it after install and uninstall (Frugal-Bridge no longer creates
+  it; it says what to do instead).
+- Tests: 44 (was 41; 43 run by default, the real Claude Code test is opt-in): install + uninstall with a base
+  path containing spaces and Frugal-Bridge (byte-identical, re-run byte-identical), refusal with an older
+  Frugal-Bridge, Hermes without `SOUL.md`.
+
 ## v1.0.1 (2026-11-11)
 
 - Skeleton Base 1.3.2 (`d036212`) vendored from GitHub; Frugal-Bridge 6 (`c2841b1`) unchanged.

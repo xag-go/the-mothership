@@ -20,5 +20,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-Skeleton Base and Frugal-Bridge, vendored under components/, are MIT-licensed by their authors. Their license
-files are in their own repositories (Skeleton Base's is also in components/skeleton-base/LICENSE).
+Skeleton Base and Frugal-Bridge, vendored under components/, are separate works under their own MIT licenses
+and copyright notices, shipped with them unchanged:
+  components/skeleton-base/LICENSE   (Skeleton Base)
+  components/frugal-bridge/LICENSE   (Frugal-Bridge)

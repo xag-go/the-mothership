@@ -442,7 +442,15 @@ PROGRESS.md and never create a second copy. Project files (`PROGRESS.md`, `PROJE
 the current project folder, created only when needed. If the project has its own `.kits.json`, its slots win.
 """
 
-BASE_PATH_RE = re.compile(r"<!-- base-folder:start[^>]*-->.*?^Path: *(\S+)", re.S | re.M)
+BASE_PATH_RE = re.compile(r"<!-- base-folder:start[^>]*-->.*?^Path:[ \t]*(.+?)[ \t]*$", re.S | re.M)
+
+
+def parse_base_path(raw):
+    """'Path:' value: `quoted`, "quoted" or 'quoted' (spaces allowed), else the rest of the line."""
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] in "`\"'" and raw[0] in raw[1:]:
+        return raw[1:raw.index(raw[0], 1)]
+    return raw
 
 
 def find_base(files):
@@ -450,7 +458,7 @@ def find_base(files):
     for f in files:
         m = BASE_PATH_RE.search(read(f) or "")
         if m:
-            d = os.path.expanduser(m.group(1))
+            d = os.path.expanduser(parse_base_path(m.group(1)))
             k = read(os.path.join(d, ".kits.json"))
             try:
                 if k and "base-folder" in json.loads(k).get("kits", {}):
@@ -515,10 +523,22 @@ class GlobalSetup(Setup):
             if not os.path.exists(user):
                 write(user, open(os.path.join(KIT, "templates", "USER.md")).read()); self.log.append(f"created {user}")
             body = rules + GLOBAL_NOTE.format(user=user)
+        r.pop("needs_user", None)
         for t in hosts:
             home, fname, _ = targets[t]
             f = os.path.join(home, fname)
             prev = tools.get(t, {})
+            if t == "hermes" and not os.path.exists(f):
+                tools.pop(t, None)
+                # Creating SOUL.md would replace the tool's default identity: only add to an existing one.
+                r.setdefault("needs_user", {})[t] = f
+                self.pending_block = self.core(body)
+                self.copy_skills(os.path.join(home, "skills", "frugal-bridge"))
+                dst = os.path.join(home, "plugins", "frugal-bridge")
+                shutil.copytree(os.path.join(ROOT, "adapter", "plugin", "frugal-bridge"), dst, dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns("__pycache__"))
+                r.setdefault("copied", {})[t] = {"home": home, "plugin": dst}
+                continue
             self._modes = {f: prev.get("mode")} if prev.get("mode") else {}
             existed = os.path.exists(f)
             mode = self.put_block(f, body, after_base=True)
@@ -585,6 +605,9 @@ class GlobalSetup(Setup):
                     data = json.loads(st)
                     self.drop_hooks(data)
                     self.change(sf, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        for t, info in (r.get("copied") or {}).items():
+            shutil.rmtree(os.path.join(info["home"], "skills", "frugal-bridge"), ignore_errors=True)
+            shutil.rmtree(info["plugin"], ignore_errors=True)
         for f in ("frugal_hook.py", "global.json"):
             if os.path.exists(os.path.join(self.d, f)):
                 os.remove(os.path.join(self.d, f))
@@ -594,6 +617,11 @@ class GlobalSetup(Setup):
     def check(self):
         out, ok = [], True
         tools = (self.reg().get("tools") or {})
+        for t, f in (self.reg().get("needs_user") or {}).items():
+            out.append(f"{t}: needs user — {f} does not exist; not created (it would replace the default identity)")
+        if not tools and self.reg().get("needs_user"):
+            out.insert(0, "OK")
+            return "\n".join(out)
         if not tools:
             return "PROBLEMS\nnot installed for any tool (no agent tool found? use --hosts)"
         for t, info in tools.items():
@@ -627,6 +655,14 @@ def main_global(argv):
         print("  rules: " + ", ".join(sorted(tools)) + " load them by themselves")
         if "claude-code" in tools:
             print("  hooks: context watch + start files (tools with session/prompt hooks)")
+        for t, f in (g.reg().get("needs_user") or {}).items():
+            print(f"  {t}: NEEDS USER — {f} does not exist and was not created (creating it would replace the")
+            print(f"    tool's default identity). To turn the rules on there, create that file with your own identity text")
+            print(f"    and re-run install --global, or paste this block into it:")
+            print(getattr(g, "pending_block", ""))
+            c = (g.reg().get("copied") or {}).get(t)
+            if c:
+                print(f"  {t} plugin: copied to {c['plugin']} — enable it to turn it on (restarts that tool's gateway)")
         if "hermes" in tools:
             print(f"  plugin: copied to {tools['hermes'].get('plugin')} — enable it to turn it on (restarts that tool's gateway)")
         proxy = [b for b in PROXY_TOOLS if shutil.which(b)]

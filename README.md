@@ -37,9 +37,10 @@ python3 the-mothership/install.py --no-watch [--timer]     # no watcher service 
 python3 the-mothership/install.py --verbose                # also show both products' own output
 ```
 
-A base path with spaces works with `--no-frugal`. With Frugal-Bridge the installer refuses it before writing
-anything, because the vendored Frugal-Bridge reads the base path only up to the first space (it would keep a
-second user file); pick a path without spaces.
+A base path with spaces works, with or without Frugal-Bridge (both products write and read it quoted, for
+example `Path: "/home/you/my notes"`). Only a Frugal-Bridge that cannot read a quoted path (one without
+`parse_base_path` in its `kit/setup.py`, older than the vendored one) makes the installer refuse such a path,
+before writing anything; `--no-frugal` or a path without spaces then works.
 
 Running it again changes nothing (byte for byte). If an install is interrupted, run the same command again: it
 continues. If a step fails on a first install, everything it did is undone.
@@ -134,4 +135,6 @@ python3 tools/update-components.py --check            # verify the vendored file
 The suite also runs both products' own test suites from the vendored copies (Frugal-Bridge's pytest-style tests
 through `tests/pytest_adapter.py`, no pytest needed).
 
-License: MIT (same as both components). See [CHANGELOG.md](CHANGELOG.md).
+License: MIT, see [LICENSE](LICENSE). The two vendored components keep their own MIT licenses and copyright
+notices: [components/skeleton-base/LICENSE](components/skeleton-base/LICENSE) and
+[components/frugal-bridge/LICENSE](components/frugal-bridge/LICENSE). See [CHANGELOG.md](CHANGELOG.md).

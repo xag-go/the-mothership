@@ -337,3 +337,56 @@ def test_is_ours_does_not_match_other_hooks():
         assert not S.Setup._is_ours({"hooks": [{"command": c}]}), c
     for c in ('python3 "/a b/.frugal-bridge/frugal_hook.py"', 'python3 /x/frugal_hook.py', f'python3 "/x/y.py" {S.HOOK_TAG}'):
         assert S.Setup._is_ours({"hooks": [{"command": c}]}), c
+
+
+def test_global_never_creates_soul_md(tmp_path, monkeypatch, capsys):
+    home = _fake_home(tmp_path, monkeypatch)
+    (home / ".hermes").mkdir()                       # Hermes present, no SOUL.md (default identity in use)
+    (home / ".claude").mkdir()
+    assert S.main(["setup.py", "install", "--global"]) == 0
+    out = capsys.readouterr().out
+    assert not (home / ".hermes" / "SOUL.md").exists()
+    assert "NEEDS USER" in out and "frugal-bridge:start" in out           # block printed for the user
+    assert "needs user" in S.GlobalSetup().check()
+    assert (home / ".claude" / "CLAUDE.md").read_text().count("frugal-bridge:start") == 1
+    assert (home / ".hermes" / "plugins" / "frugal-bridge").exists()       # plugin copy is not identity
+    assert S.main(["setup.py", "install", "--global"]) == 0               # re-run: still not created
+    assert not (home / ".hermes" / "SOUL.md").exists()
+    (home / ".hermes" / "SOUL.md").write_text("You are Kai.\n")            # user makes one -> block added after
+    assert S.main(["setup.py", "install", "--global"]) == 0
+    t = (home / ".hermes" / "SOUL.md").read_text()
+    assert t.startswith("You are Kai.\n") and t.count("frugal-bridge:start") == 1
+    assert S.main(["setup.py", "uninstall", "--global"]) == 0
+    assert (home / ".hermes" / "SOUL.md").read_text() == "You are Kai.\n"
+    assert not (home / ".hermes" / "plugins" / "frugal-bridge").exists()
+
+
+def test_global_hermes_profile_soul_not_created(tmp_path, monkeypatch):
+    home = _fake_home(tmp_path, monkeypatch)
+    prof = tmp_path / "hh" / "profiles" / "work"; prof.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(prof))
+    assert S.main(["setup.py", "install", "--global", "--hosts", "hermes"]) == 0
+    assert not (prof / "SOUL.md").exists()
+
+
+def test_base_path_with_spaces(tmp_path):
+    b = tmp_path / "My Base Folder"; (b / "wiki" / "me").mkdir(parents=True)
+    (b / ".kits.json").write_text(json.dumps({"kits": {"base-folder": {}}, "slots": {"user": "wiki/me/", "now": "hot.md"}}))
+    f = tmp_path / "CLAUDE.md"
+    for line in (f"Path: `{b}`", f'Path: "{b}"', f"Path: '{b}'", f"Path: {b}", f"Path:   {b}   "):
+        f.write_text(f"x\n<!-- base-folder:start v2 -->\n## KB\n{line}\n- more\n<!-- base-folder:end -->\n")
+        assert S.find_base([str(f)]) == str(b), line
+    nb = tmp_path / "plainbase"; nb.mkdir()
+    (nb / ".kits.json").write_text(json.dumps({"kits": {"base-folder": {}}}))
+    f.write_text(f"<!-- base-folder:start v2 -->\nPath: {nb}\n<!-- base-folder:end -->\n")   # old format
+    assert S.find_base([str(f)]) == str(nb)
+    assert S.parse_base_path("`/a b/c` (the base)") == "/a b/c"
+
+
+def test_public_license_and_docs_have_no_org_names():
+    root = os.path.dirname(HERE)
+    src = os.path.join(root, "public") if os.path.isdir(os.path.join(root, "public")) else root   # private tree / export
+    lic = open(os.path.join(src, "LICENSE")).read()
+    org = "x" + "ag-" + "go"      # spelled in parts so the public export carries no org name
+    assert "Copyright (c) 2026 Frugal-Bridge contributors" in lic and org[:3] not in lic.lower()
+    assert org not in open(os.path.join(src, "README.md")).read()

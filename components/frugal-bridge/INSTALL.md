@@ -39,7 +39,11 @@ if a settings file is not valid JSON it stops without changing it — tell the u
 If it finds no agent tool, ask the user which one they use and re-run with `--hosts <name>`
 (`claude-code, codex, gemini, opencode, hermes`).
 
-The report ends with "Enforcement on this machine". Two lines may need the user's yes:
+The report ends with "Enforcement on this machine". Three lines may need the user:
+- **NEEDS USER — … SOUL.md does not exist**: some tools keep their identity in a user file (e.g. Hermes `SOUL.md`);
+  setup never creates it, because that would replace the tool's default identity. Tell the user; if they want the
+  rules there, they create the file with their own identity text and you re-run `install --global` (or they paste
+  the printed block into it).
 - **plugin copied … enable it**: enabling restarts that tool's gateway (running chats pause a few seconds). Ask, then
   run the enable command the tool documents (e.g. `hermes plugins enable frugal-bridge`, then restart its gateway).
 - **proxy available for …**: see step 6.

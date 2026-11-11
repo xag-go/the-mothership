@@ -814,3 +814,13 @@ Readings:
   (`frugal_hook.py`), so upgrades replace them. One helper (`merge_hooks` / `drop_hooks`) is the rule for any tool's
   JSON hooks, project and global. Tests 59/59 (+ custom FRUGAL_HOME re-run byte-identical, + upgrade from old-style
   hooks, + uninstall leaves other hooks intact, + marker does not match foreign hooks). Repro now: 1 per event after 3 runs.
+
+### 2.30 Fixes for bundling (2026-11-11)
+- LICENSE: "Copyright (c) 2026 Frugal-Bridge contributors"; README clone line and the public DESIGN use
+  "<this repository's URL>"; publish.sh replaces the repo URL and refuses to publish if the org name appears.
+- `install --global` never creates a tool's identity file (Hermes `SOUL.md`, also in a profile home): it adds the
+  block only to an existing one; otherwise reports "NEEDS USER", prints the block, still copies plugin + skills
+  (not identity). Uninstall removes those copies.
+- Base `Path:` parser: accepts `backtick`, "double" or 'single' quoted paths with spaces, else the rest of the line;
+  old format unchanged.
+- Tests 63/63 (+ SOUL not created / created later / profile home, + 6 path formats, + license/README check).

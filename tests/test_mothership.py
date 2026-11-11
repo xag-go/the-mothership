@@ -293,15 +293,9 @@ class InstallTests(Base):
         self.assertEqual(tree(self.home), t0)
 
     def test_base_path_with_spaces(self):
-        """Skeleton Base quotes a path with spaces everywhere. The vendored Frugal-Bridge cannot read such a path
-        yet, so with Frugal the install is refused before anything is written; without it, it works."""
+        """Skeleton Base quotes a path with spaces everywhere; without Frugal-Bridge that always works."""
         base = self.home / "my base"
         t0 = tree(self.home)
-        if not frugal_quoted:
-            out = self.ms("--yes", "--base", base, rc=2)
-            self.assertIn("contains a space", out)
-            self.assertIn("--no-frugal", out)
-            self.assertEqual(tree(self.home), t0)
         out = self.ms("--yes", "--no-frugal", "--base", base)
         self.assertIn("checks: all OK", out)
         for f in self.rules():
@@ -316,6 +310,62 @@ class InstallTests(Base):
         self.py(base / "tools/brain.py", "connect", "--base", base)
         out = self.ms("--yes", "--no-frugal")
         self.assertIn(f"found an existing knowledge base: {base}", out)
+
+    @unittest.skipUnless(frugal_quoted, "the vendored Frugal-Bridge has no parse_base_path (quoted Path: lines)")
+    def test_base_path_with_spaces_and_frugal_install_uninstall_byte_identical(self):
+        """The vendored Frugal-Bridge reads a quoted Path: line, so a base path with spaces works with it too:
+        one user file (the base), both blocks in order, and uninstall gives the home back byte for byte."""
+        self.user_files()
+        base = self.home / "my notes" / "second brain"
+        t0 = tree(self.home)
+        out = self.ms("--yes", "--base", base)
+        self.assertIn("checks: all OK", out)
+        self.assertIn(f"Your knowledge base: {base}", out)
+        for f in self.rules():
+            self.assert_order(f)
+            self.assertIn(f'Path: "{base}"\n', f.read_text())
+        self.assertEqual(json.loads((self.home / ".frugal-bridge/global.json").read_text())["base"], str(base))
+        self.assertFalse((self.home / ".frugal-bridge/USER.md").exists())      # no second user file
+        self.assertIn(str(base), self.ms("status"))                             # found without --base
+        self.assertIn("check: OK", self.ms("check"))
+        t1 = tree(self.home)
+        self.ms("--yes", "--base", base)                                         # re-run: byte-identical
+        self.assertEqual(tree(self.home), t1)
+        self.ms("uninstall")
+        self.assertEqual(tree(self.home), t0)
+        self.assertFalse(base.exists())
+
+    def test_base_path_with_spaces_refused_with_an_older_frugal(self):
+        """A vendored Frugal-Bridge without parse_base_path reads the path only up to the first space: refused
+        before anything is written, with --no-frugal as the way out."""
+        repo = self.copy_repo(self.tmp / "older-frugal")
+        setup = repo / "components" / FB_VENDOR.name / "kit" / "setup.py"
+        setup.write_text(setup.read_text().replace("parse_base_path", "old_base_path"))
+        self.py(repo / "tools/update-components.py", "--relock", "--only", "frugal-bridge")
+        base = self.home / "my base"
+        t0 = tree(self.home)
+        out = self.ms("--yes", "--base", base, rc=2, repo=repo)
+        self.assertIn("contains a space", out)
+        self.assertIn("--no-frugal", out)
+        self.assertEqual(tree(self.home), t0)
+        self.assertIn("checks: all OK", self.ms("--yes", "--no-frugal", "--base", base, repo=repo))
+
+    def test_hermes_without_soul_md_stays_without_it(self):
+        """A Hermes home with no SOUL.md keeps its default identity: Frugal-Bridge never creates SOUL.md, and
+        install + uninstall leave the home byte-identical."""
+        hermes = self.home / ".hermes"
+        hermes.mkdir()
+        (hermes / "config.yaml").write_text("model: default\n")
+        t0 = tree(self.home)
+        for env in ({}, {"HERMES_AGENT": "true"}):
+            with self.subTest(env=env):
+                out = self.ms("--yes", **env)
+                self.assertIn("checks: all OK", out)
+                self.assertFalse((hermes / "SOUL.md").exists(), out)
+                self.ms("check", **env)
+                self.ms("uninstall", **env)
+                self.assertFalse((hermes / "SOUL.md").exists())
+                self.assertEqual(tree(self.home), t0)
 
     def test_existing_base_adopted_not_duplicated(self):
         mine = self.home / "my-brain"
@@ -522,7 +572,7 @@ class CheckStatusTests(Base):
         self.assertEqual(s1, s2)
         lock = json.loads((REPO / "components.lock").read_text())["components"]
         self.assertEqual(s1.splitlines()[:4], [
-            "The Mothership 1.0.1", f"base: {self.base}",
+            "The Mothership 1.0.2", f"base: {self.base}",
             f"component frugal-bridge: {lock['frugal-bridge']['version']} @ {lock['frugal-bridge']['commit']}",
             f"component skeleton-base: {lock['skeleton-base']['version']} @ {lock['skeleton-base']['commit']}"])
         self.assertIn("connected: ~/.claude/CLAUDE.md", s1)
