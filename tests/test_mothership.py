@@ -162,7 +162,7 @@ class InstallTests(Base):
         out = self.ms("--yes")
         self.assertIn("checks: all OK", out)
         self.assertIn("systemctl --user daemon-reload && systemctl --user enable --now skeleton-base-watch.service "
-                      "skeleton-base-collect.timer", out)
+                      "skeleton-base-collect.timer skeleton-base-tidy.timer", out)
         self.assertIn("hot.md", out)
         self.assertIn("maps/brain.html", out)
         for f in self.rules():
@@ -179,7 +179,8 @@ class InstallTests(Base):
         self.assertEqual(kits["slots"]["now"], "hot.md")
         a = (self.base / "AGENTS.md").read_text()
         self.assertLess(a.index("<!-- base-folder:start"), a.index("<!-- frugal-bridge:start"))
-        for u in ("skeleton-base-watch.service", "skeleton-base-collect.timer"):
+        for u in ("skeleton-base-watch.service", "skeleton-base-collect.timer", "skeleton-base-tidy.timer",
+                  "skeleton-base-tidy.service"):
             self.assertTrue((self.home / ".config/systemd/user" / u).is_file())
         st = self.state()
         self.assertEqual(st["own"], {"base": "installed", "connect": "installed", "frugal_global": "installed",
@@ -606,14 +607,35 @@ class SystemdTests(Base):
     def test_yes_enables_units_when_systemctl_works_and_uninstall_disables(self):
         self.fake_systemctl()
         out = self.ms("--yes")
-        self.assertIn("systemd: enabled skeleton-base-watch.service skeleton-base-collect.timer", out)
+        self.assertIn("systemd: enabled skeleton-base-watch.service skeleton-base-collect.timer skeleton-base-tidy.timer", out)
         log = self.sd_log.read_text()
-        self.assertIn("--user enable --now skeleton-base-watch.service skeleton-base-collect.timer", log)
+        self.assertIn("--user enable --now skeleton-base-watch.service skeleton-base-collect.timer skeleton-base-tidy.timer", log)
         self.assertEqual(self.state()["systemd"]["enabled_by_us"],
-                         ["skeleton-base-watch.service", "skeleton-base-collect.timer"])
+                         ["skeleton-base-watch.service", "skeleton-base-collect.timer", "skeleton-base-tidy.timer"])
         self.ms("uninstall")
-        self.assertIn("--user disable --now skeleton-base-watch.service skeleton-base-collect.timer",
+        self.assertIn("--user disable --now skeleton-base-watch.service skeleton-base-collect.timer "
+                      "skeleton-base-tidy.timer", self.sd_log.read_text())
+        for u in ("skeleton-base-tidy.timer", "skeleton-base-tidy.service", "skeleton-base-watch.service"):
+            self.assertFalse((self.home / ".config/systemd/user" / u).exists(), u)
+
+    def test_upgrade_from_an_install_without_the_tidy_timer_enables_it_and_uninstall_removes_it(self):
+        self.fake_systemctl()
+        t0 = tree(self.home)
+        self.ms("--yes")
+        st = self.state()
+        st["systemd"]["enabled_by_us"] = ["skeleton-base-watch.service", "skeleton-base-collect.timer"]
+        st["systemd"]["units"] = ["skeleton-base-collect.timer", "skeleton-base-watch.service"]
+        (self.base / ".mothership.json").write_text(json.dumps(st, indent=2) + "\n")
+        self.sd_log.write_text("")
+        self.ms("--yes")
+        self.assertIn("enable --now skeleton-base-watch.service skeleton-base-collect.timer skeleton-base-tidy.timer",
                       self.sd_log.read_text())
+        self.assertIn("skeleton-base-tidy.timer", self.state()["systemd"]["enabled_by_us"])
+        self.ms("uninstall")
+        self.assertIn("--user disable --now skeleton-base-watch.service skeleton-base-collect.timer "
+                      "skeleton-base-tidy.timer", self.sd_log.read_text())
+        self.assertFalse((self.home / ".config/systemd/user/skeleton-base-tidy.timer").exists())
+        self.assertEqual(tree(self.home), t0)
 
     def test_without_yes_only_prints(self):
         self.fake_systemctl()
@@ -642,7 +664,7 @@ class SystemdTests(Base):
 
     def test_timer_only(self):
         out = self.ms("--yes", "--no-watch", "--timer")
-        self.assertIn("enable --now skeleton-base-collect.timer", out)
+        self.assertIn("enable --now skeleton-base-collect.timer skeleton-base-tidy.timer", out)
         self.assertFalse((self.home / ".config/systemd/user/skeleton-base-watch.service").exists())
         self.assertTrue((self.home / ".config/systemd/user/skeleton-base-collect.timer").exists())
 

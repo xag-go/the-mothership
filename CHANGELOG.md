@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.2 (2026-11-12)
+
+- Skeleton Base 1.5.1 (`a31a61a`) vendored from GitHub (was 1.4.1 `e282bde`), with 1.5.0: `brain.py file` (collected
+  memories filed on one page each by code, 0 tokens) and `brain.py tidy` (rare model pass with whichever agent CLI
+  is installed). 1.5.1: every tool's pointer block says how it finds its role and name (own identity first, else
+  the ONE `agents/` file whose `engines:` lists it, else no name and ask once; never a name from `wiki/me/`);
+  `engines:` lists in role files; watcher `MemoryMax` 160M (40M OOM-killed the 1.5.0 watcher).
+- Frugal-Bridge `ed757f2` vendored (was `a1e1ef9`): the main agent's name no longer comes from the user file; the
+  start notice adds the base role file only on one safe match.
+- install enables the tidy timer that Skeleton Base `connect` writes (`skeleton-base-tidy.timer`, with the watcher
+  or `--timer`), only when the unit file exists; uninstall disables it with the others and `disconnect` removes the
+  files. An upgrade from 1.1.1 adds it to the units it enabled.
+
 ## v1.1.1 (2026-11-11)
 
 - Real tool x provider matrix: `tests/real/test_real_matrix.py` (opt-in `MOTHERSHIP_REAL=1`, never in CI). Each row

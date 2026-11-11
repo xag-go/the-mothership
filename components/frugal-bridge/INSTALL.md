@@ -13,7 +13,9 @@ By default it is installed **for the user, not for one folder**: every agent too
 by itself in every folder and every new session. Nothing has to be repeated per project.
 
 ## 1. Ask the user (one message)
-1. **A name for the main agent** (any name; e.g. "Sara").
+1. **A name for the main agent** (optional; e.g. "Sara"). It goes in the agent's role file, never in the user file:
+   with a knowledge base, `name:` in the base's `agents/` file whose `engines:` lists this tool; otherwise the
+   tool's own identity file or its `ROLE.md`.
 2. **Language and answer style** (e.g. "English, short", "Darija in Latin letters, short").
 3. **Which models** they can use, if you can't tell yourself (e.g. Claude Haiku/Sonnet/Opus, GPT, Gemini).
 4. Only if relevant: **everywhere** (default) **or one folder only**?
@@ -55,7 +57,7 @@ The report ends with "Enforcement on this machine". Three lines may need the use
 ## 5. Fill the user file
 - Everywhere: open `~/.frugal-bridge/USER.md` (the path is in the report). One-folder install: `<folder>/USER.md` —
   but if `<folder>/.kits.json` lists `base-folder`, a knowledge base owns the user files: do not create or edit them.
-- Fill: main agent name, language and script, answer style. Leave the other lines for later.
+- Fill: language and script, answer style. Leave the other lines for later. No agent names here (step 1).
 
 ## 6. Optional: proxy (tools with a configurable API base URL)
 Only if setup listed tools for the proxy, the user wants the rules enforced there, and agrees to run a small local server:

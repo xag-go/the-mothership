@@ -651,6 +651,12 @@ Full detail and numbers: `abtest/RESULTS.md` (single source of truth). Summary:
   Darija gap a native speaker saw.
 
 
+### Main agent name and role (2026-11-12, BUILT)
+The main agent's role and name come from its own identity (system prompt, SOUL.md/identity file, ROLE.md), else
+from the ONE knowledge-base `agents/` file whose `engines:` lists the tool; zero or several matches = no name, ask
+once. Never from `USER.md` (with a base it holds the user's words about other roles). Start notice adds the role
+file only on one safe match for a known host with no own identity. RESULTS 2.40.
+
 ## Build status (2026-11-10)
 | Part | Where | State |
 |---|---|---|

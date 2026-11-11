@@ -335,9 +335,70 @@ def _sf_quote(p):
     return q + p + q
 
 
-def start_hint(project_dir=None, tag="[frugal-bridge]"):
-    """The first-turn instruction naming the start files, or None when there are none."""
+_SF_NO_ENGINE = {"", "any", "none", "unset", "-"}
+_SF_BLOCK_RE = re.compile(r"<!-- (base-folder|frugal-bridge):start[^>]*-->.*?<!-- \1:end -->", re.S)
+
+
+def _sf_fm_list(text, key):
+    """Frontmatter values of key: `[a, b]`, a block list of `- a` lines, or one plain value."""
+    if not (text or "").startswith("---\n") or text.find("\n---", 4) < 0:
+        return []
+    lines = text[4:text.find("\n---", 4)].splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"^" + re.escape(key) + r"\s*:(.*)$", line)
+        if not m:
+            continue
+        v = m.group(1).split(" #")[0].strip()
+        if v.startswith("[") and v.endswith("]"):
+            return [x.strip().strip("\"'") for x in v[1:-1].split(",") if x.strip().strip("\"'")]
+        if v:
+            return [v.strip("\"'")]
+        out = []
+        for l in lines[i + 1:]:
+            mm = re.match(r"^\s*-\s*(.*)$", l)
+            if not mm:
+                break
+            out.append(mm.group(1).split(" #")[0].strip().strip("\"'"))
+        return [x for x in out if x]
+    return []
+
+
+def role_file(host=None, project_dir=None, identity_files=()):
+    """The base's agents/ROLE file for this host, only when it is safe: the host is known, it has no own identity
+    (a project ROLE.md, or an identity file with text outside the kits' blocks) and exactly ONE role file lists it
+    in `engines:` (or the old `engine:`). Anything else: None, never a guess."""
+    if not host:
+        return None
+    if project_dir and os.path.isfile(os.path.join(os.path.abspath(project_dir), "ROLE.md")):
+        return None
+    for f in identity_files:
+        if _SF_BLOCK_RE.sub("", _sf_text(f) or "").strip():
+            return None
+    base = find_base()
+    if not base:
+        return None
+    a = os.path.join(base, "agents")
+    try:
+        names = sorted(n for n in os.listdir(a) if n.endswith(".md"))
+    except OSError:
+        return None
+    hits = []
+    for n in names:
+        t = _sf_text(os.path.join(a, n)) or ""
+        eng = [e for e in _sf_fm_list(t, "engines") + _sf_fm_list(t, "engine") if e.lower() not in _SF_NO_ENGINE]
+        if host in eng:
+            hits.append(os.path.join(a, n))
+    return hits[0] if len(hits) == 1 else None
+
+
+def start_hint(project_dir=None, tag="[frugal-bridge]", host=None, identity_files=()):
+    """The first-turn instruction naming the start files, or None when there are none. The role file joins them
+    only when role_file() finds exactly one safe match for this host."""
     files, notes = start_files(project_dir)
+    rf = role_file(host, project_dir, identity_files)
+    if rf and rf not in files:
+        files.append(rf)
+        notes.append(f"your role and name: {_sf_quote(rf)}")
     if not files:
         return None
     extra = ("; " + "; ".join(notes)) if notes else ""

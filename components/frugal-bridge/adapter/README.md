@@ -47,6 +47,12 @@ Setup copies it into the tool's plugin folder; enabling it restarts that tool's 
 (`base_dir` is written by a project install only; without it the start files come from the knowledge base or
 `~/.frugal-bridge/USER.md`).
 
+Role file (who am I): the start notice adds the knowledge base's `agents/` file for the tool only when the hook or
+plugin knows its host, exactly ONE role file lists that host in `engines:` (or the old `engine:`), and the host has
+no own identity (a project `ROLE.md`, or an identity file such as Hermes `SOUL.md` with text outside the kits'
+blocks). Zero or several matches, an own identity, or the proxy (host unknown): no role file. The main agent's
+name is never taken from the user file.
+
 **`proxy/frugal_proxy.py`** — sits between any tool and any provider. Run it, then point the tool's base URL at
 `http://127.0.0.1:8790/<route>` (routes: `anthropic`, `openai`, `chatgpt`, `openrouter`, `gemini`, `xai`; more in
 config). Keys pass through untouched; it stores none. Wire formats: Anthropic Messages, OpenAI Chat Completions,

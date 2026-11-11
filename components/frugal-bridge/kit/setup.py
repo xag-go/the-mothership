@@ -1378,7 +1378,7 @@ def main_global(argv):
         if r.get("base"):
             print(f"  user files: the knowledge base {r['base']} owns them (no second copy made)")
         else:
-            print(f"  user file: {os.path.join(g.d, 'USER.md')} — fill it (name of the main agent, language, style)")
+            print(f"  user file: {os.path.join(g.d, 'USER.md')} — fill it (language, answer style; agent names go in role files, not here)")
         print("  usage report: python3 kit/setup.py report [days]")
         return 0 if rep.startswith("OK") else 1
     if argv[1] == "uninstall":

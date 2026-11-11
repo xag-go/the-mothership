@@ -959,3 +959,13 @@ Readings:
 - Fix: `~/.claude/agents/frugal-*.md` get the table's exact id in Anthropic form (`claude-haiku-5-5`,
   `claude-sonnet-5-5`, `claude-opus-5-5`); the rules paragraph says to prefer the subagent over the Agent tool's alias.
 - Test `test_tier_values_claude` checks the ids against tiers.json. Tests 236/236.
+
+### 2.40 Who am I: role and name from the role file, never from the user file (2026-11-12)
+- Bug seen live: a coding CLI started outside the base answered with the twin's name, read from the user pages
+  (CORE said the main agent's name is set in `USER.md`; with a base that is `wiki/me/`, where only the twin is named).
+- CORE §1: own identity first, else the ONE base `agents/` file whose `engines:` lists this tool (its `name:`),
+  else no personal name + ask once; never a name from `USER.md`. `USER.md` template has no agent name; `ROLE.md`
+  template has an optional `Name`.
+- Shared start-files block: `role_file(host, project_dir, identity_files)`; hooks pass their host, the Hermes plugin
+  passes `hermes` + its `SOUL.md` (any own text = own identity = no role file), the proxy passes none.
+- Tests: `adapter/test_roles.py` 5 new; suite 241 passed (tiers + output filter tests unchanged and green).

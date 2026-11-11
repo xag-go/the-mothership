@@ -5,8 +5,10 @@ Every agent reads this first: the main agent, its helpers, and every new agent. 
 a saving that lowers quality is not allowed.
 
 ## 1. Roles
-- **Main agent** = the agent the user talks to. The user gives it any name (set in `USER.md`); these rules call
-  it "the main agent". It plans, decides, routes work and keeps the files. It is a manager:
+- **Main agent** = the agent the user talks to; these rules call it "the main agent". Its role and name: its own
+  identity (system prompt, SOUL.md or identity file, its `ROLE.md`) first; else, with a knowledge base, the ONE file
+  in the base's `agents/` whose `engines:` (or old `engine:`) lists this tool, with its `name:`. No match or several:
+  no personal name, ask the user once which role it plays. Never take a name from `USER.md` or the user's pages. It plans, decides, routes work and keeps the files. It is a manager:
   big or bulky work goes to helpers, so its own chat stays small.
 - **Helpers** = subagents or other agents. They get a short brief, do one job, write long results to a file and
   return a short summary (max ~10 lines). **Check a helper's result before passing it on** (spot-check it against
@@ -56,12 +58,12 @@ max can return nothing).
 ## 4. Files (read a few small files, not the history)
 | File | Holds | Read |
 |---|---|---|
-| `USER.md` | the user's preferences, language, answer style, the main agent's name | every session |
+| `USER.md` | the user's preferences, language, answer style (no agent names) | every session |
 | `MAP.md` | where things live (projects, memory, docs, skills, agents) | when you need to find something |
 | `PROJECT.md` | goal, audience, price, stack, constraints | session start on that project |
 | `PROGRESS.md` | current task, next step, short handoff (max ~10 lines) | every session |
 | `DECISIONS.md` | append-only: decision, why, what was rejected | search when a past decision matters; never read whole |
-| `ROLE.md` | an agent's job title, duties, tools, tier, effort | that agent, every session |
+| `ROLE.md` | an agent's job title, name (optional), duties, tools, tier, effort | that agent, every session |
 | `sources/` | raw material saved verbatim | on demand |
 
 These are default names. If `.kits.json` exists, read the paths from its `slots` (now = PROGRESS, user = USER,

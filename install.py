@@ -27,15 +27,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 ROOT = Path(__file__).resolve().parent
 LOCK = "components.lock"
 STATE = ".mothership.json"
 DEFAULT_BASE = "~/skeleton-base-home"
 SB, FB = "skeleton-base", "frugal-bridge"
 COMPONENTS = (SB, FB)
-WATCH_UNITS = ["skeleton-base-watch.service", "skeleton-base-collect.timer"]
-TIMER_UNITS = ["skeleton-base-collect.timer"]
+WATCH_UNITS = ["skeleton-base-watch.service", "skeleton-base-collect.timer", "skeleton-base-tidy.timer"]
+TIMER_UNITS = ["skeleton-base-collect.timer", "skeleton-base-tidy.timer"]   # tidy: Skeleton Base 1.5.0+ connect
+UNIT_DIR = ".config/systemd/user"
 PAYLOAD = ("install.py", LOCK, "components", "LICENSE", "README.md", "CHANGELOG.md")
 SKIP = {"__pycache__", ".git"}
 BASE_START = "<!-- base-folder:start"
@@ -958,6 +959,8 @@ class Mothership:
                          f"the watcher by hand: python3 {base / 'tools' / 'brain.py'} watch")
             return
         units = WATCH_UNITS if flags == ["--watch"] else TIMER_UNITS
+        # enable what this base's connect wrote (an older vendored base writes no tidy timer)
+        units = [u for u in units if (home() / UNIT_DIR / u).is_file()] or units[:1]
         sd = self.st["systemd"]
         sd["units"] = sorted(set(sd["units"]) | set(units))
         cmd = "systemctl --user daemon-reload && systemctl --user enable --now " + " ".join(units)
