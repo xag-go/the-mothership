@@ -1,12 +1,17 @@
 # Changelog
 
-## v1.1.3 (2026-11-12)
+## v1.1.4 (2026-11-11)
+
+- Skeleton Base 1.5.3 (`21f5b59`) vendored: `brain.py file` also flags a small number change in the same place
+  (1.5.1 -> 1.5.2, a port or a count) as a conflict.
+
+## v1.1.3 (2026-11-11)
 
 - Skeleton Base 1.5.2 (`2abbf49`) vendored (was 1.5.1 `a31a61a`): `brain.py file` no longer flags a false
   "negation" conflict. A "not" in another clause of a long memory is no longer compared against an unrelated
   page sentence; real flips and changed numbers stay flagged. 3 regression tests in Skeleton Base.
 
-## v1.1.2 (2026-11-12)
+## v1.1.2 (2026-11-11)
 
 - Skeleton Base 1.5.1 (`a31a61a`) vendored from GitHub (was 1.4.1 `e282bde`), with 1.5.0: `brain.py file` (collected
   memories filed on one page each by code, 0 tokens) and `brain.py tidy` (rare model pass with whichever agent CLI
