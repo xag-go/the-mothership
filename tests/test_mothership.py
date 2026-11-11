@@ -19,6 +19,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SB_VENDOR = REPO / "components" / "skeleton-base"
 FB_VENDOR = REPO / "components" / "frugal-bridge"
+frugal_quoted = "def parse_base_path" in (FB_VENDOR / "kit" / "setup.py").read_text()   # reads quoted Path: lines
 SCRUB = ("HERMES_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "FRUGAL_HOME", "FRUGAL_BRIDGE_KIT", "FRUGAL_BRIDGE_SRC",
          "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "MOTHERSHIP_HOME",
          "MOTHERSHIP_PLATFORM", "MOTHERSHIP_TEST_FAIL", "MOTHERSHIP_TEST_KILL", "BRAIN_ROOT", "HERMES_AGENT")
@@ -291,11 +292,30 @@ class InstallTests(Base):
         self.py(payload / "install.py", "uninstall")
         self.assertEqual(tree(self.home), t0)
 
-    def test_base_path_with_spaces_refused_cleanly(self):
+    def test_base_path_with_spaces(self):
+        """Skeleton Base quotes a path with spaces everywhere. The vendored Frugal-Bridge cannot read such a path
+        yet, so with Frugal the install is refused before anything is written; without it, it works."""
+        base = self.home / "my base"
         t0 = tree(self.home)
-        out = self.ms("--yes", "--base", self.home / "my base", rc=2)
-        self.assertIn("contains a space", out)
+        if not frugal_quoted:
+            out = self.ms("--yes", "--base", base, rc=2)
+            self.assertIn("contains a space", out)
+            self.assertIn("--no-frugal", out)
+            self.assertEqual(tree(self.home), t0)
+        out = self.ms("--yes", "--no-frugal", "--base", base)
+        self.assertIn("checks: all OK", out)
+        for f in self.rules():
+            self.assertIn(f'Path: "{base}"\n', f.read_text())
+        self.assertIn(str(base), self.ms("status"))
+        unit = (self.home / ".config/systemd/user/skeleton-base-watch.service").read_text()
+        self.assertIn(f'watch --base "{base}"', unit)
+        self.ms("uninstall")
         self.assertEqual(tree(self.home), t0)
+        # an already connected base with spaces is found again by its quoted Path: line
+        self.py(SB_VENDOR / "tools/brain.py", "init", base, "--frugal=no")
+        self.py(base / "tools/brain.py", "connect", "--base", base)
+        out = self.ms("--yes", "--no-frugal")
+        self.assertIn(f"found an existing knowledge base: {base}", out)
 
     def test_existing_base_adopted_not_duplicated(self):
         mine = self.home / "my-brain"
@@ -502,7 +522,7 @@ class CheckStatusTests(Base):
         self.assertEqual(s1, s2)
         lock = json.loads((REPO / "components.lock").read_text())["components"]
         self.assertEqual(s1.splitlines()[:4], [
-            "The Mothership 1.0.0", f"base: {self.base}",
+            "The Mothership 1.0.1", f"base: {self.base}",
             f"component frugal-bridge: {lock['frugal-bridge']['version']} @ {lock['frugal-bridge']['commit']}",
             f"component skeleton-base: {lock['skeleton-base']['version']} @ {lock['skeleton-base']['commit']}"])
         self.assertIn("connected: ~/.claude/CLAUDE.md", s1)
@@ -599,6 +619,113 @@ class UpdateUninstallTests(Base):
         out = self.py(self.base / "tools/brain.py", "connect", "--watch", "--base", self.base)
         self.assertNotIn("kit was not found", out)
         self.assertEqual(json.loads((self.home / ".frugal-bridge/global.json").read_text())["base"], str(self.base))
+        for f in self.rules():
+            self.assert_order(f)
+
+
+class AdoptVersionTests(Base):
+    """Adopting an existing base never downgrades it."""
+
+    def newer_skeleton(self, release="9.0.0"):
+        sb = self.tmp / "sb-newer"
+        shutil.copytree(SB_VENDOR, sb, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        b = sb / "tools/brain.py"
+        t = b.read_text()
+        self.assertRegex(t, r'(?m)^RELEASE = "')
+        b.write_text(re.sub(r'(?m)^RELEASE = "[^"]+"', f'RELEASE = "{release}"', t, count=1))
+        p = sb / "templates/person.md"
+        p.write_text(p.read_text() + "\nNEWER TEMPLATE LINE\n")
+        return sb
+
+    def test_newer_base_is_kept_unless_force(self):
+        sb = self.newer_skeleton()
+        self.py(sb / "tools/brain.py", "init", self.base, "--frugal=no")
+        newer = {r: (self.base / r).read_bytes() for r in ("tools/brain.py", "templates/person.md")}
+        self.assertEqual(json.loads((self.base / ".kits.json").read_text())["kits"]["base-folder"]["release"], "9.0.0")
+        plan = self.ms("--dry-run", "--base", self.base)
+        self.assertIn("keep Skeleton Base 9.0.0", plan)
+        out = self.ms("--yes", "--base", self.base)
+        self.assertIn("Skeleton Base in the base: 9.0.0 is newer than the vendored", out)
+        self.assertIn("note: the base keeps its newer Skeleton Base 9.0.0", out)
+        self.assertIn("checks: all OK", out)
+        for r, b in newer.items():
+            self.assertEqual((self.base / r).read_bytes(), b, r)        # not downgraded
+        self.assertEqual(self.state()["base_kept"]["release"], "9.0.0")
+        for f in self.rules():
+            self.assert_order(f)
+        t1 = tree(self.home)
+        self.ms("--yes")                                                # re-run: still kept, byte-identical
+        self.assertEqual(tree(self.home), t1)
+        out = self.ms("update", "--yes")
+        self.assertIn("is newer than the vendored", out)
+        self.assertEqual((self.base / "tools/brain.py").read_bytes(), newer["tools/brain.py"])
+        out = self.ms("--yes", "--force")
+        self.assertIn("--force: Skeleton Base 9.0.0 in the base is replaced", out)
+        for r in newer:
+            self.assertEqual((self.base / r).read_bytes(), (SB_VENDOR / r).read_bytes(), r)
+        self.assertIsNone(self.state()["base_kept"])
+        self.assertIn("check: OK", self.ms("check"))
+
+    def test_same_or_older_base_is_refreshed(self):
+        for rel, want in (("1.0.0", "refreshed"), (None, "refreshed")):
+            with self.subTest(release=rel):
+                base = self.tmp / f"b-{rel}"
+                self.py(SB_VENDOR / "tools/brain.py", "init", base, "--frugal=no")
+                k = json.loads((base / ".kits.json").read_text())
+                if rel:
+                    k["kits"]["base-folder"]["release"] = rel
+                else:
+                    k["kits"]["base-folder"].pop("release")           # a base from before 1.3.2
+                (base / ".kits.json").write_text(json.dumps(k, indent=2) + "\n")
+                out = self.ms("--yes", "--no-frugal", "--base", base)
+                self.assertNotIn("is newer than the vendored", out)
+                self.assertIn("- Skeleton Base: init", out)
+                self.assertEqual(json.loads((base / ".kits.json").read_text())["kits"]["base-folder"]["release"],
+                                 json.loads((REPO / "components.lock").read_text())["components"]["skeleton-base"]
+                                 ["version"])
+                self.ms("uninstall")
+
+
+class LintWarningTests(Base):
+    """Lint issues in your own pages are warnings, never an install failure."""
+
+    def bad_pages(self, base):
+        (base / "wiki/projects/no-front.md").write_text("# No frontmatter\n\nSee [[nowhere]].\n")
+        (base / "wiki/people/Bad_Name.md").write_text(page_text("Bad", "x"))
+
+    def test_install_exits_0_with_warnings_and_check_fails_only_for_install_problems(self):
+        self.ms("--yes")
+        self.bad_pages(self.base)
+        out = self.ms("--yes")                                  # re-run with broken pages: still 0
+        self.assertIn("checks: all OK", out)
+        self.assertIn("lint issue(s) in your own pages", out)
+        self.assertIn("WARN lint: wiki/projects/no-front.md: missing frontmatter", out)
+        self.assertIn("WARN lint: wiki/projects/no-front.md: broken link [[nowhere]]", out)
+        self.assertIn("WARN lint: wiki/people/Bad_Name.md: file name must be lowercase", out)
+        out = self.ms("check")
+        self.assertIn("WARN lint: wiki/projects/no-front.md: missing frontmatter", out)
+        self.assertRegex(out, r"check: OK, \d+ warning\(s\)")
+        self.assertNotIn("FAIL", out)
+        codex = self.home / ".codex/AGENTS.md"                  # an install problem still fails check
+        codex.write_text(strip_blocks(codex.read_text(), "base-folder"))
+        out = self.ms("check", rc=1)
+        self.assertIn(f"FAIL {codex}: 0 base pointer blocks", out)
+        self.assertIn("WARN lint:", out)
+        self.ms("--yes")
+        for p in ("wiki/projects/no-front.md", "wiki/people/Bad_Name.md"):
+            (self.base / p).unlink()
+        self.py(self.base / "tools/brain.py", "index", "--root", self.base)
+        out = self.ms("check")
+        self.assertIn("check: OK (", out)
+        self.assertNotIn("WARN", out)
+
+    def test_adopting_a_base_with_lint_issues_installs(self):
+        mine = self.home / "my-brain"
+        self.py(SB_VENDOR / "tools/brain.py", "init", mine, "--frugal=no")
+        self.bad_pages(mine)
+        out = self.ms("--yes", "--base", mine)
+        self.assertIn("checks: all OK", out)
+        self.assertIn("WARN lint: wiki/projects/no-front.md: missing frontmatter", out)
         for f in self.rules():
             self.assert_order(f)
 

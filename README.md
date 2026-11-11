@@ -31,11 +31,15 @@ Without `--yes` it asks where the base should live (default `~/skeleton-base-hom
 background watcher. `--dry-run` shows the plan and writes nothing.
 
 ```sh
-python3 the-mothership/install.py --base ~/notes/brain     # another folder for the base (no spaces in the path)
+python3 the-mothership/install.py --base ~/notes/brain     # another folder for the base (see below for spaces)
 python3 the-mothership/install.py --no-frugal              # only the knowledge base
 python3 the-mothership/install.py --no-watch [--timer]     # no watcher service (or only a daily timer)
 python3 the-mothership/install.py --verbose                # also show both products' own output
 ```
+
+A base path with spaces works with `--no-frugal`. With Frugal-Bridge the installer refuses it before writing
+anything, because the vendored Frugal-Bridge reads the base path only up to the first space (it would keep a
+second user file); pick a path without spaces.
 
 Running it again changes nothing (byte for byte). If an install is interrupted, run the same command again: it
 continues. If a step fails on a first install, everything it did is undone.
@@ -58,19 +62,23 @@ On macOS the watcher is skipped and said so; the session hooks still collect, an
 
 Already have a Skeleton Base or Frugal-Bridge? They are found and **adopted**, never installed twice. A
 Frugal-Bridge profile (`~/.frugal-bridge/USER.md`) is merged into `wiki/me/` (nothing is overwritten; anything
-unclear lands on a review card in `board/`).
+unclear lands on a review card in `board/`). An adopted base is **never downgraded**: when its Skeleton Base
+release (`.kits.json` `kits.base-folder.release`, or the `RELEASE` line of its `tools/brain.py`) is newer than the
+vendored one, it is kept as it is and the summary says so; `--force` installs the vendored version over it.
 
 ## Check, status, update
 
 ```sh
-python3 ~/.local/share/the-mothership/payload/install.py check    # every check; names each problem; exit 1 on any
+python3 ~/.local/share/the-mothership/payload/install.py check    # names each problem; exit 1 on install problems
 python3 ~/.local/share/the-mothership/payload/install.py status   # what is installed, versions, connected tools
 ```
 
 `check` runs both products' own checks, `brain.py lint`, and its own: one base block and one Frugal-Bridge block
 per rules file (base first), Frugal-Bridge uses the base as its only user file, the watcher is running, and the
-vendored files match `components.lock`. Lint also checks your own pages (front matter, links): it may ask you to
-run `python3 tools/brain.py index` in the base after you add pages.
+vendored files match `components.lock`. Only those install problems make it exit 1 (`FAIL` lines). `brain.py
+lint` checks your own pages (front matter, links, file names); what it finds is listed as `WARN` lines and never
+fails `check` or `install` (install exits 0 with the list). It may ask you to run `python3 tools/brain.py index`
+in the base after you add pages.
 
 Update to a newer version: get the new version of this repository (`git pull`), then
 

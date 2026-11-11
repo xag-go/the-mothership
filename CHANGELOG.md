@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.0.1 (2026-11-11)
+
+- Skeleton Base 1.3.2 (`ef24388`) vendored from GitHub; Frugal-Bridge 6 (`c2841b1`) unchanged.
+- A tool installed later gets both blocks (base first) from the watcher alone: Skeleton Base 1.3.2 runs
+  Frugal-Bridge's `install --global --hosts TOOL` for it.
+- Adopting an existing base never downgrades it: a base whose Skeleton Base release is newer than the vendored one
+  is kept as it is (said in the plan and the summary, recorded as `base_kept` in `.mothership.json`); `--force`
+  installs the vendored version over it. Also for `update`.
+- Lint findings in your own pages are warnings: `install` exits 0 and lists them (`WARN lint: ...`); `check` lists
+  them too and exits 1 only for install problems (missing blocks, block order, watcher stopped, lock mismatch,
+  Frugal-Bridge checks).
+- Base paths with spaces: allowed with `--no-frugal` (Skeleton Base quotes them everywhere); with Frugal-Bridge
+  still refused before anything is written, because the vendored Frugal-Bridge reads the path only up to the first
+  space. An already connected base is found from a quoted `Path:` line too.
+- Tests: 41 (was 37), plus the opt-in real Claude Code test.
+
 ## v1.0.0 (2026-11-11)
 
 First release.

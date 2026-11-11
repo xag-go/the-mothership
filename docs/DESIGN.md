@@ -55,7 +55,9 @@ Frugal-Bridge is never placed inside the base (the two products stay separate).
 ## 3. Install order (coexistence contract: base first, Frugal second)
 
 1. verify `components.lock`; stage the payload copy
-2. `brain.py init DIR --frugal=no` (Skeleton Base; its own Frugal question is answered by The Mothership)
+2. `brain.py init DIR --frugal=no` (Skeleton Base; its own Frugal question is answered by The Mothership). Skipped
+   when the base already has a newer Skeleton Base (its `.kits.json` `release` or `RELEASE` in its `brain.py` is
+   higher than the vendored one and its `brain.py` differs): never downgraded, said in the summary, `--force` overrides
 3. `kit/setup.py install DIR` (Frugal-Bridge in the base: it sees the base and makes no second USER/PROGRESS files)
 4. `DIR/tools/brain.py connect --base DIR --watch` (user-level pointer blocks, hooks, systemd user units on Linux)
 5. `kit/setup.py install --global` (Frugal-Bridge at user level: finds the base through the block's `Path:` line,
@@ -70,9 +72,10 @@ Frugal-Bridge is never placed inside the base (the two products stay separate).
 9. systemd: `--yes` runs `systemctl --user daemon-reload && systemctl --user enable --now ...` when
    `systemctl --user` works; otherwise the command is printed. macOS: the watcher is skipped and said so
    (hooks still collect at session end; `brain.py watch` runs it by hand)
-10. checks: `brain.py check`, `brain.py lint`, Frugal `check DIR` and `check --global`, plus the contract
+10. checks: `brain.py check`, Frugal `check DIR` and `check --global`, the lock, the watcher, plus the contract
    checks of The Mothership (one base block and one Frugal block per file, base block first, Frugal uses the
-   base as its only user slot)
+   base as its only user slot). These are install problems: `install` / `check` exit 1. `brain.py lint` is about
+   the user's own pages: its findings are printed as warnings and never change the exit code
 
 A Frugal-Bridge that was installed at user level before is **adopted**: step 4 imports its `USER.md` into
 `wiki/me/` (Skeleton Base's own import, never overwriting). An existing base is adopted the same way. Adopted
@@ -93,11 +96,13 @@ parts are never removed by `uninstall`.
 
 ## 5. Limits
 
-- The base path must not contain whitespace: both products write it unquoted (Frugal-Bridge reads the
-  `Path:` line up to the first space; hook commands are not quoted). The installer refuses such a path.
-- `systemctl` parts run only where `systemctl --user` works. No launchd agent in v1.0.0.
-- A tool installed later gets the base pointer from the watcher, but Frugal-Bridge's block only on the next
-  `install.py` run: Skeleton Base re-runs Frugal-Bridge's setup only for the tools Frugal-Bridge already has.
+- Base path with spaces: Skeleton Base 1.3.2 quotes it everywhere (`Path: "..."`, shell commands, systemd
+  units). The vendored Frugal-Bridge 6 reads the `Path:` line only up to the first space, so with Frugal-Bridge the
+  installer refuses such a path (nothing written); `--no-frugal` installs it. The check looks at the Frugal-Bridge
+  kit itself (a version that reads quoted paths has `parse_base_path`), so a re-vendored Frugal lifts it.
+- `systemctl` parts run only where `systemctl --user` works. No launchd agent.
+- A tool installed later: the watcher writes the base pointer and runs Frugal-Bridge's `install --global --hosts
+  TOOL` for that tool alone (Skeleton Base 1.3.2), so it gets both blocks without another `install.py` run.
 - Gemini CLI and other tools that limit file access to the working folder may still ask before reading the base;
   only Claude Code's access is configured (tested with a real `claude -p`).
 - Adopting an existing base applies the vendored Skeleton Base version to it (same as re-running its `init`).

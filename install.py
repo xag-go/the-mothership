@@ -2,9 +2,9 @@
 """The Mothership: one install for Skeleton Base (knowledge base) + Frugal-Bridge (token-saving rules).
 
 Usage
-  python3 install.py [install] [--base DIR] [--yes] [--no-frugal] [--watch|--no-watch] [--timer] [--dry-run]
+  python3 install.py [install] [--base DIR] [--yes] [--no-frugal] [--watch|--no-watch] [--timer] [--dry-run] [--force]
   python3 install.py check | status            [--base DIR]
-  python3 install.py update                     [--base DIR] [--yes]
+  python3 install.py update                     [--base DIR] [--yes] [--force]
   python3 install.py uninstall                  [--base DIR] [--yes] [--keep-backups] [--purge [--confirm-purge DIR]]
 
 Python 3.10+ standard library only. Works offline from the vendored copies in components/ (checked against
@@ -20,7 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 ROOT = Path(__file__).resolve().parent
 LOCK = "components.lock"
 STATE = ".mothership.json"
@@ -260,11 +260,24 @@ def frugal_reg():
     return r if isinstance(r, dict) else None
 
 
+def parse_path_value(v):
+    """The folder in a `Path:` line: as it is, or wrapped in one of " ' ` (a path with spaces; no escaping)."""
+    v = v.strip()
+    if len(v) >= 2 and v[0] in "\"'`" and v[0] in v[1:]:
+        if v[0] == '"' and v.endswith('"') and v.count('"') > 2:
+            try:
+                return json.loads(v)          # Skeleton Base's fallback for a path holding all three quotes
+            except json.JSONDecodeError:
+                pass
+        return v[1:v.index(v[0], 1)]
+    return v
+
+
 def connected_base():
     for f in tool_rules_files():
         m = PATH_RE.search(read(f) or "")
         if m:
-            d = Path(os.path.expanduser(m.group(1).strip()))
+            d = Path(os.path.expanduser(parse_path_value(m.group(1))))
             if "base-folder" in kits(d):
                 return d
     r = frugal_reg()
@@ -280,6 +293,33 @@ def own_frugal_kit():
         if c and (Path(c).expanduser() / "kit" / "setup.py").is_file():
             return Path(c).expanduser()
     return None
+
+
+def version_tuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", str(v or "")))
+
+
+def release_in(brain_py):
+    m = re.search(r'^RELEASE *= *"([^"]+)"', read(brain_py) or "", re.M)
+    return m.group(1) if m else None
+
+
+def base_release(base):
+    """(release, sha256 of tools/brain.py) of the Skeleton Base already in a folder. The release comes from
+    .kits.json (kits.base-folder.release, 1.3.2+) or the RELEASE line of its brain.py; None = older or unknown."""
+    b = Path(base) / "tools" / "brain.py"
+    rel = (kits(base).get("base-folder") or {}).get("release") or release_in(b)
+    return rel, (sha_bytes(b.read_bytes()) if b.is_file() else None)
+
+
+def frugal_reads_quoted_paths(kit_dir):
+    """Frugal-Bridge versions that read a quoted `Path:` value (a base path with spaces) have parse_base_path."""
+    return "def parse_base_path" in (read(Path(kit_dir) / "kit" / "setup.py") or "")
+
+
+def lint_lines(out):
+    """The problem lines of `brain.py lint` output (its warning lines and the summary line left out)."""
+    return [l for l in out.splitlines() if l.strip() and not l.startswith("warning:") and not l.startswith("lint (")]
 
 
 def systemctl_ok():
@@ -363,10 +403,8 @@ class Mothership:
             raise Fail("components.lock check failed, nothing was installed:\n  " + "\n  ".join(probs)
                        + "\nGet a clean copy of The Mothership (or run tools/update-components.py) and retry.")
         base = self.resolve_base(True)
-        if re.search(r"\s", str(base)):
-            raise Fail(f"the base path contains a space or tab: {base}\nBoth products write this path unquoted "
-                       "into tool rules and hook commands. Pick a path without spaces (for example "
-                       f"{home() / 'skeleton-base-home'}) and run again with --base.")
+        if "\n" in str(base) or "\r" in str(base):
+            raise Fail(f"the base path contains a line break: {base!r}")
         if base.exists() and not base.is_dir():
             raise Fail(f"{base} exists and is not a folder")
         mh = mothership_home()
@@ -402,9 +440,19 @@ class Mothership:
                     own[part] = "installed"
         fresh = not prev and not resumed and not any(v == "adopted" for v in own.values())
         use_frugal = opts["frugal"] or own.get("frugal_global") == "adopted"
+        if use_frugal and re.search(r"[\s\"'`$\\]", str(base)):
+            kits_used = [ROOT / "components" / FB] + ([own_frugal_kit()] if own.get("frugal_global") == "adopted"
+                                                       and own_frugal_kit() else [])
+            old = [str(k) for k in kits_used if not frugal_reads_quoted_paths(k)]
+            if old:
+                raise Fail(f"the base path contains a space or quote: {base}\nSkeleton Base writes it quoted, but "
+                           f"this Frugal-Bridge ({', '.join(old)}) reads the base path only up to the first space and "
+                           "would keep a second user file. Pick a path without spaces (for example "
+                           f"{home() / 'skeleton-base-home'}) and run again with --base, or use --no-frugal.")
+        keep = self.newer_base(base)
         connect_flags = ["--watch"] if opts["watch"] else (["--timer"] if opts["timer"] else [])
 
-        plan = self.plan(base, opts, own, connect_flags)
+        plan = self.plan(base, opts, own, connect_flags, keep)
         if self.a.dry_run:
             self.say("dry run: nothing is written. The install would:")
             for i, line in enumerate(plan, 1):
@@ -422,6 +470,7 @@ class Mothership:
               "backups_before": (journal or {}).get("backups_before") or sorted(backup_snapshot(base)),
               "originals": st["originals"] if "originals" in st else self.save_originals(),
               "claude_access": dict(st.get("claude_access") or {}),
+              "base_kept": keep,
               # user-level rules files that did not exist yet: removed on uninstall when only whitespace is left
               "absent_before": st["absent_before"] if "absent_before" in st else
               sorted(str(f) for f in tool_rules_files() if not f.exists()),
@@ -431,7 +480,7 @@ class Mothership:
                  + f" The Mothership {VERSION} -> base {base}")
         self.save_journal()
         try:
-            self.steps(base, opts, own, use_frugal, connect_flags)
+            self.steps(base, opts, own, use_frugal, connect_flags, keep)
         except Fail as ex:
             if fresh:
                 self.say(f"ERROR: {ex}\nrolling back what this install did ...")
@@ -446,10 +495,31 @@ class Mothership:
         self.summary(base, report, old_components)
         return 0 if not report else 1
 
-    def plan(self, base, opts, own, flags):
+    def newer_base(self, base):
+        """None, or what is kept: the base's Skeleton Base is newer than the vendored one (never downgraded
+        unless --force)."""
+        if "base-folder" not in kits(base):
+            return None
+        have, have_sha = base_release(base)
+        vend_brain = ROOT / "components" / SB / "tools" / "brain.py"
+        vend = release_in(vend_brain) or (load_json(ROOT / LOCK, {}) or {}).get("components", {}).get(SB, {}) \
+            .get("version")
+        if not have or have_sha == sha_bytes(vend_brain.read_bytes()) \
+                or version_tuple(have) <= version_tuple(vend):
+            return None
+        if self.a.force:
+            self.say(f"--force: Skeleton Base {have} in the base is replaced by the vendored {vend}")
+            return None
+        return {"release": have, "brain_sha256": have_sha, "vendored": vend}
+
+    def plan(self, base, opts, own, flags, keep=None):
         p = [f"check {LOCK} against the vendored components", f"copy itself to {self.payload}"]
-        p.append(("adopt and refresh" if own.get("base") == "adopted" else "install")
-                 + f" Skeleton Base in {base} (brain.py init --frugal=no)")
+        if keep:
+            p.append(f"keep Skeleton Base {keep['release']} in {base}: newer than the vendored {keep['vendored']} "
+                     "(--force installs the vendored one)")
+        else:
+            p.append(("adopt and refresh" if own.get("base") == "adopted" else "install")
+                     + f" Skeleton Base in {base} (brain.py init --frugal=no)")
         if opts["frugal"]:
             p.append(f"install Frugal-Bridge into the base (kit/setup.py install {base})")
         p.append("connect the base for this user: pointer blocks in your AI tools' user rules files, Claude Code "
@@ -516,15 +586,19 @@ class Mothership:
         test_hook("kill", step)
         test_hook("fail", step)
 
-    def steps(self, base, opts, own, use_frugal, flags):
+    def steps(self, base, opts, own, use_frugal, flags, keep=None):
         self.stage()
         self.track("stage")
         probs = verify_lock(self.payload)
         if probs:
             raise Fail("the staged copy does not match the lock:\n  " + "\n  ".join(probs))
 
-        self.say(f"- Skeleton Base: init {base}")
-        self.py(self.sbk / "tools" / "brain.py", "init", base, "--frugal=no")
+        if keep:
+            self.say(f"- Skeleton Base in the base: {keep['release']} is newer than the vendored {keep['vendored']}; "
+                     "kept as it is (--force installs the vendored one)")
+        else:
+            self.say(f"- Skeleton Base: init {base}")
+            self.py(self.sbk / "tools" / "brain.py", "init", base, "--frugal=no")
         self.track("base-init")
 
         if opts["frugal"]:
@@ -732,9 +806,15 @@ class Mothership:
             o = (old.get(n) or {}).get("commit")
             ch = f" (was {o[:12]})" if o and o != e["commit"] else ""
             self.say(f"{n} {e.get('version')} @ {str(e.get('commit'))[:12]}{ch}")
+        keep = self.st.get("base_kept")
+        if keep:
+            self.say(f"note: the base keeps its newer Skeleton Base {keep['release']} (brain.py sha256 "
+                     f"{str(keep['brain_sha256'])[:12]}); the vendored {keep['vendored']} was not installed over it "
+                     "(--force does)")
         self.say("checks: " + ("all OK" if not report else f"{len(report)} problem(s)"))
         for r in report:
             self.say("  FAIL " + r)
+        self.show_warnings()
         self.say(f"\nYour knowledge base: {base}\n  open {base / 'hot.md'} (what matters now)\n"
                  f"  open {base / 'maps' / 'brain.html'} in a browser (mind map, offline)\n"
                  "  then ask any AI tool: \"interview me and fill wiki/me/, one question at a time\"\n"
@@ -892,8 +972,11 @@ class Mothership:
         if rc:
             probs.append("brain.py check: " + " | ".join(l for l in out.splitlines() if l and not l.startswith("OK")))
         rc, out = self.py(brain, "lint", cwd=base, check=False)
-        if rc:
-            probs.append("brain.py lint: " + out.splitlines()[-1] if out else "brain.py lint failed")
+        self.warnings = []
+        if rc:       # lint is about the pages you write: reported, never an install problem
+            lines = lint_lines(out)
+            summ = [l for l in out.splitlines() if l.startswith("lint (")]
+            self.warnings = [f"lint: {l}" for l in lines] or [f"lint: {(summ or [out.strip() or 'failed'])[-1]}"]
         own = st.get("own") or {}
         frugal = (st.get("options") or {}).get("frugal", True)
         if frugal and "frugal-bridge" in kits(base):
@@ -950,13 +1033,27 @@ class Mothership:
                 self.say("FAIL " + p)
         return probs
 
+    def show_warnings(self, limit=20):
+        w = getattr(self, "warnings", None) or []
+        if not w:
+            return
+        self.say(f"warnings: {len(w)} lint issue(s) in your own pages (not an install problem; the install is "
+                 "fine). Fix them when you like, then run: python3 tools/brain.py lint (in the base)")
+        for x in w[:limit]:
+            self.say("  WARN " + x)
+        if len(w) > limit:
+            self.say(f"  ... and {len(w) - limit} more")
+
     def check(self):
         base = self.resolve_base(False)
         if not (base / STATE).exists():
             self.say(f"FAIL no install record in {base / STATE}")
             return 1
         probs = self.checks(base)
-        self.say(f"check: {'OK' if not probs else str(len(probs)) + ' problem(s)'} ({base})")
+        self.show_warnings()
+        w = len(getattr(self, "warnings", None) or [])
+        self.say(f"check: {'OK' if not probs else str(len(probs)) + ' problem(s)'}"
+                 + (f", {w} warning(s)" if w else "") + f" ({base})")
         return 1 if probs else 0
 
     def status(self):
@@ -997,6 +1094,7 @@ def main(argv=None):
     p.add_argument("--no-watch", dest="watch", action="store_false")
     p.add_argument("--timer", action="store_true", help="daily collect timer (also comes with --watch)")
     p.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+    p.add_argument("--force", action="store_true", help="install the vendored Skeleton Base even over a newer one")
     p.add_argument("--keep-backups", action="store_true", help="uninstall: keep the products' backup folders")
     p.add_argument("--purge", action="store_true", help="uninstall: also delete the base with your pages")
     p.add_argument("--confirm-purge", metavar="DIR", help="non-interactive confirmation for --purge")
