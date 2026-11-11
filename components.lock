@@ -12,15 +12,15 @@
       "version": "6"
     },
     "skeleton-base": {
-      "commit": "21f5b594e9f9254e3e02dad36d298d8fed77dc11",
+      "commit": "84f6e79431bee91fd443f9c8d7a767930161b5d0",
       "excluded": [],
       "files": 52,
       "manifest": "components/skeleton-base.manifest",
-      "manifest_sha256": "5b4cc517b6271f56bf96a4d24619e3d64cc6047f61568703cd90e2b6fa208d3b",
+      "manifest_sha256": "074cfd13ec1bd70b81feacf066f9e5226e9240739bb1689c803e7659a959c6ec",
       "path": "components/skeleton-base",
       "repo": "https://github.com/<owner>/skeleton-base",
       "vendored_from": "github",
-      "version": "1.5.3"
+      "version": "1.5.4"
     }
   },
   "lock_version": 1

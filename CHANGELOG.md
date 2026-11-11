@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.5 (2026-11-11)
+
+- Skeleton Base 1.5.4 (`84f6e79`) vendored (was 1.5.3 `21f5b59`): `tidy` waits for the watcher's writes (a page run
+  holds the collector lock) and ignores the watcher's own generated writes, so a good page is no longer put back;
+  `tidy` exits 0 when a page was put back (the systemd unit no longer shows `failed`); `file` records index lines and
+  duplicates as done, and `watch` commits that bookkeeping. 4 regression tests in Skeleton Base.
+
 ## v1.1.4 (2026-11-11)
 
 - Skeleton Base 1.5.3 (`21f5b59`) vendored: `brain.py file` also flags a small number change in the same place
