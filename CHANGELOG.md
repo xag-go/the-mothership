@@ -2,7 +2,7 @@
 
 ## v1.0.3 (2026-11-11)
 
-- Skeleton Base 1.3.3 (`7dac9eb`) and Frugal-Bridge 6 (`4920444`) vendored from GitHub (were `d036212` and
+- Skeleton Base 1.3.3 (`81ca8ed`) and Frugal-Bridge 6 (`4920444`) vendored from GitHub (were `d036212` and
   `a84e5ec`); nothing excluded.
 - Frugal-Bridge finds the base without a tool rules file (`--base`, the base's pointer file
   `~/.config/skeleton-base/base`, its systemd units): a home whose only tool is Hermes without `SOUL.md` now has one
