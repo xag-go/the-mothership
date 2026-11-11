@@ -853,3 +853,9 @@ Readings:
   file, PROGRESS/PROJECT/DECISIONS/sources (edited ones), usage logs (`<tool home>/frugal-bridge/usage.jsonl`), hook
   state, backups. The report ends with "your data is kept: …".
 - Tests 70/70 (+ global and project data-safety cases). Real E2E with Skeleton Base re-run: still byte-identical.
+
+### 2.34 Test isolation (2026-11-11)
+- On a machine with Frugal installed globally, `test_no_start_hint_without_files` read the real
+  `~/.frugal-bridge/global.json` (69/70). Fix: `conftest.py` in `kit/` and `adapter/` gives every test its own HOME and
+  FRUGAL_HOME and unsets tool home/agent variables. This machine (real global install present): 70/70; kit and adapter
+  alone pass too; the real global.json is unchanged after the run.

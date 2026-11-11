@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.0.7 (2026-11-11)
+
+- Frugal-Bridge `16a2b9c` vendored from GitHub (was `3c86a64`): its tests run with an isolated HOME/FRUGAL_HOME (conftest), so a real install on the machine can't change a result. No code change.
+
 ## v1.0.6 (2026-11-11)
 
 - Skeleton Base 1.3.5 (`e66997f`) vendored from GitHub (was `64acace`): `connect` lets every tool read and write
