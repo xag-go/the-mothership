@@ -422,6 +422,9 @@ class Mothership:
               "backups_before": (journal or {}).get("backups_before") or sorted(backup_snapshot(base)),
               "originals": st["originals"] if "originals" in st else self.save_originals(),
               "claude_access": dict(st.get("claude_access") or {}),
+              # user-level rules files that did not exist yet: removed on uninstall when only whitespace is left
+              "absent_before": st["absent_before"] if "absent_before" in st else
+              sorted(str(f) for f in tool_rules_files() if not f.exists()),
               "done": list((journal or {}).get("done") or [])}
         self.st, self.base = st, base
         self.say(("resuming an interrupted install" if resumed else "updating" if update else "installing")
@@ -531,7 +534,9 @@ class Mothership:
                 self.say("- Frugal-Bridge in the base: a newer version is installed there; kept as it is")
             else:
                 self.say("- Frugal-Bridge: install into the base")
-                self.py(self.fbk / "kit" / "setup.py", "install", base)
+                # its own default hosts minus "hermes": a project install for Hermes writes into the user's Hermes
+                # home; the user-level install below covers Hermes properly (rules block + plugin)
+                self.py(self.fbk / "kit" / "setup.py", "install", base, "--hosts", "claude-code,gemini")
         self.track("frugal-project")
 
         kit = self.frugal_kit_for_base(own)
@@ -822,6 +827,11 @@ class Mothership:
             if f.exists():
                 f.unlink()
         self.restore_originals(st.get("originals"))
+        for f in st.get("absent_before") or []:
+            t = read(f)
+            if t is not None and not t.strip():
+                os.remove(f)
+                self.say(f"- removed {f} (empty; it did not exist before)")
         mh0 = Path(st.get("data") or mothership_home())
         if (mh0 / "originals").is_dir():
             shutil.rmtree(mh0 / "originals")

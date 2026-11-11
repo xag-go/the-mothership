@@ -236,6 +236,22 @@ class InstallTests(Base):
         for rel, h in t0.items():
             self.assertEqual(tree(self.home).get(rel), h, rel)
 
+    def test_inside_an_agent_session_env_and_existing_hermes_identity(self):
+        """Run from inside an agent tool (HERMES_AGENT set): nothing may be left in that tool's home."""
+        t0 = tree(self.home)
+        self.ms("--yes", HERMES_AGENT="true")
+        self.ms("uninstall", HERMES_AGENT="true")
+        self.assertEqual(tree(self.home), t0)
+        soul = self.home / ".hermes/SOUL.md"
+        soul.parent.mkdir()
+        soul.write_text("You are my assistant.\n")
+        t0 = tree(self.home)
+        self.ms("--yes", HERMES_AGENT="true")
+        self.assert_order(soul)
+        self.assertTrue(soul.read_text().startswith("You are my assistant.\n"))
+        self.ms("uninstall", HERMES_AGENT="true")
+        self.assertEqual(tree(self.home), t0)
+
     def test_no_frugal(self):
         t0 = tree(self.home)
         out = self.ms("--yes", "--no-frugal")
