@@ -1,0 +1,8 @@
+name: frugal-bridge
+version: "0.1.0"
+description: "Frugal-Bridge adapter: context watch (new-session offers), start-file hint, big terminal output filter, usage log + /frugal report"
+provides_hooks:
+  - pre_api_request
+  - post_api_request
+  - pre_llm_call
+  - transform_terminal_output
