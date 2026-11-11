@@ -98,11 +98,41 @@ python3 ~/.local/share/the-mothership/payload/install.py uninstall
 ```
 
 It undoes everything in reverse order, using each product's own uninstall, and gives your files back byte for
-byte: rules files, settings (including their original layout), systemd units, folders it created, and the backup
-copies the products made along the way (`--keep-backups` keeps those). Pages you wrote stay in the base folder.
-To delete the base with everything in it: `uninstall --purge` (it asks you to type the folder path;
-non-interactive: `--purge --confirm-purge ~/skeleton-base-home`). Anything that was there before The Mothership
-(an adopted base or Frugal-Bridge) stays installed.
+byte: rules files, settings (including their original layout), systemd units and folders it created.
+Pages you wrote stay in the base folder. Anything that was there before The Mothership (an adopted base or
+Frugal-Bridge) stays installed.
+
+## Uninstall keeps your data
+
+Removing The Mothership (or Skeleton Base) never deletes anything of yours.
+
+- **Full backup first.** Before anything is undone (the watcher is stopped first, so nothing writes meanwhile),
+  the whole base, `.git` and dotfiles included, goes to `~/skeleton-base-backups/NAME-YYYYmmdd-HHMMSS.tar.gz`
+  (mode 600, folder 700, outside the base, read back and checked). The path and a one-line restore command
+  (`mkdir -p PARENT && tar -xpzf ARCHIVE -C PARENT`) are printed. If the backup cannot be written, nothing is
+  uninstalled. `--backup-dir DIR` picks another folder (never inside the base); `--no-backup` skips it, only when
+  you give it.
+- **Only unmodified product files go.** Wiki pages, `raw/` (also `raw/inbox/collected/`), board cards, agents,
+  `hot.md`, `progress/agents.log`, maps and templates you edited, Frugal-Bridge skill files you edited, `.brain/`
+  (collector state, backups), files of any other type and the git repository with its whole history (not even an
+  empty folder in `.git` is touched) stay exactly as they were. In shared files (`AGENTS.md`, `CLAUDE.md`,
+  `GEMINI.md`, `.gitignore`, the tools' rules files in your home) only the products' marked blocks are removed;
+  in JSON settings only the keys they added.
+- **Safety net.** If a product's uninstall ever removed a file of yours anyway (one that is not a product file
+  byte for byte), The Mothership puts it back from the backup archive and says so.
+- **Backup copies the products made** while installing and uninstalling are moved into
+  `~/skeleton-base-backups/NAME-product-backups-TIME.tar.gz` (mode 600), not deleted (`--keep-backups` leaves
+  them where they are).
+- **Afterwards it prints what was kept and where** (per folder, with the git history), and that the folder is
+  plain Markdown: any AI tool can open it as it is, and `install.py --base DIR` (or Skeleton Base's
+  `brain.py init DIR`) adopts it again without overwriting or duplicating anything.
+- **`update`** re-runs both products' setups: your pages and edited files are left alone, and a Frugal-Bridge
+  skill file you edited is not overwritten by the new version.
+- **A failed install** is rolled back without touching what was in the folder before (a backup of a non-empty
+  folder is written before installing into it).
+- **`--purge`** (delete the base) asks you to type the base's folder name (non-interactive:
+  `--yes-purge-NAME`, e.g. `--yes-purge-skeleton-base-home`), refuses `--no-backup`, writes the full backup first
+  and only works for a base The Mothership created.
 
 ## FAQ
 

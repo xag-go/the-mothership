@@ -5,7 +5,12 @@ Usage
   python3 install.py [install] [--base DIR] [--yes] [--no-frugal] [--watch|--no-watch] [--timer] [--dry-run] [--force]
   python3 install.py check | status            [--base DIR]
   python3 install.py update                     [--base DIR] [--yes] [--force]
-  python3 install.py uninstall                  [--base DIR] [--yes] [--keep-backups] [--purge [--confirm-purge DIR]]
+  python3 install.py uninstall                  [--base DIR] [--yes] [--keep-backups] [--no-backup] [--backup-dir DIR]
+                                                [--purge [--yes-purge-BASENAME]]
+
+uninstall first writes a full backup of the base (.git and dotfiles too) to ~/skeleton-base-backups/
+NAME-YYYYmmdd-HHMMSS.tar.gz (mode 600) and prints a restore command; it removes only what the products added and
+you did not change. --purge (delete the base) asks you to type the base's folder name, always backs up first.
 
 Python 3.10+ standard library only. Works offline from the vendored copies in components/ (checked against
 components.lock before anything is written). Nothing leaves your machine. See README.md and docs/DESIGN.md.
@@ -20,7 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 ROOT = Path(__file__).resolve().parent
 LOCK = "components.lock"
 STATE = ".mothership.json"
@@ -34,6 +39,13 @@ SKIP = {"__pycache__", ".git"}
 BASE_START = "<!-- base-folder:start"
 FRUGAL_START_RE = re.compile(r"<!-- frugal-bridge:start[^>]*-->")
 PATH_RE = re.compile(r"<!-- base-folder:start[^>]*-->.*?^Path: *(.+?) *$", re.S | re.M)
+BACKUPS_DIR = "skeleton-base-backups"     # under HOME, outside the base
+# files in the base the products own (their removal or rewrite is expected); anything else that a product removed
+# is put back from the backup archive. Unmodified kit files are recognised by their bytes.
+OWNED = {".kits.json", STATE, "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore", ".claude/settings.json",
+         ".gemini/settings.json", "maps/brain.canvas", "maps/brain.html", ".brain/map.json", ".brain/search.db",
+         ".brain/watch.lock", ".brain/collector.lock", ".brain/kick"}
+OWNED_PREFIXES = (".brain/pycache/",)
 STEPS = ("stage", "base-init", "frugal-project", "connect", "frugal-global", "frugal-kit-key", "claude-access", "reconnect",
          "systemd", "checks")
 
@@ -239,7 +251,8 @@ def dir_snapshot(base):
 
 
 def backup_roots(base):
-    return [frugal_home() / "backup", Path(base) / ".brain" / "backups", Path(base) / ".frugal-bridge" / "backup"]
+    return [frugal_home() / "backup", Path(base) / ".brain" / "backups", Path(base) / ".frugal-bridge" / "backup",
+            Path(base) / ".base-folder" / "backup"]
 
 
 def backup_snapshot(base):
@@ -248,6 +261,147 @@ def backup_snapshot(base):
         if r.is_dir():
             out |= {str(x) for x in r.iterdir()}
     return out
+
+
+def shq(s):
+    s = str(s)
+    return s if re.fullmatch(r"[A-Za-z0-9_./:@%+=,-]+", s) else "'" + s.replace("'", "'\\''") + "'"
+
+
+def archive_base(base, dest=None):
+    """Write the WHOLE base (dotfiles, .git, everything) to DEST/BASENAME-TIME.tar.gz (mode 600, folder 700),
+    outside the base; read it back to prove it is complete. Returns (archive path, number of files)."""
+    import io
+    import tarfile
+    import time
+    base = Path(base).resolve()
+    dest = Path(os.path.expanduser(str(dest))).resolve() if dest else (home() / BACKUPS_DIR).resolve()
+    if dest == base or base in dest.parents:
+        raise Fail(f"backup: {dest} is inside the base {base}; pass --backup-dir DIR outside it")
+    dest.mkdir(parents=True, exist_ok=True)
+    os.chmod(dest, 0o700)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    out, n = dest / f"{base.name}-{stamp}.tar.gz", 2
+    while out.exists():
+        out, n = dest / f"{base.name}-{stamp}-{n}.tar.gz", n + 1
+    tmp = out.with_name("." + out.name + ".part")
+    names = []
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh, tarfile.open(fileobj=fh, mode="w:gz") as tar:
+            tar.addfile(tar.gettarinfo(str(base), arcname=base.name))
+            for cur, dirs, files in os.walk(base):
+                dirs.sort()
+                for name in dirs + sorted(files):
+                    pth = Path(cur) / name
+                    arc = base.name + "/" + pth.relative_to(base).as_posix()
+                    ti = tar.gettarinfo(str(pth), arcname=arc)
+                    if ti is None:
+                        continue
+                    if ti.isreg():
+                        data = pth.read_bytes()
+                        ti.size = len(data)
+                        tar.addfile(ti, io.BytesIO(data))
+                        names.append(arc)
+                    else:
+                        tar.addfile(ti)
+                dirs[:] = [d for d in dirs if not (Path(cur) / d).is_symlink()]
+            fh.flush()
+            os.fsync(fh.fileno())
+        with tarfile.open(tmp, "r:gz") as tar:
+            got = sorted(m.name for m in tar if m.isreg())
+        if got != sorted(names):
+            raise Fail("backup: the archive did not read back complete")
+        os.replace(tmp, out)
+        os.chmod(out, 0o600)
+    except BaseException:
+        if tmp.exists():
+            tmp.unlink()
+        raise
+    return out, len(names)
+
+
+def archive_paths(paths, name, dest=None):
+    """Put files/folders (absolute paths) into DEST/NAME-TIME.tar.gz (mode 600), stored under their full path."""
+    import tarfile
+    import time
+    dest = Path(os.path.expanduser(str(dest))).resolve() if dest else (home() / BACKUPS_DIR).resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    os.chmod(dest, 0o700)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    out, n = dest / f"{name}-{stamp}.tar.gz", 2
+    while out.exists():
+        out, n = dest / f"{name}-{stamp}-{n}.tar.gz", n + 1
+    tmp = out.with_name("." + out.name + ".part")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh, tarfile.open(fileobj=fh, mode="w:gz") as tar:
+            for pth in paths:
+                tar.add(pth, arcname=str(pth).lstrip(os.sep))
+        with tarfile.open(tmp, "r:gz") as tar:
+            tar.getmembers()
+        os.replace(tmp, out)
+        os.chmod(out, 0o600)
+    except BaseException:
+        if tmp.exists():
+            tmp.unlink()
+        raise
+    return out
+
+
+def restore_line(archive, base):
+    base = Path(base).resolve()
+    return f"mkdir -p {shq(base.parent)} && tar -xpzf {shq(archive)} -C {shq(base.parent)}"
+
+
+def file_index(base):
+    """rel -> sha256 of every file in the base (symlinks: 'link:target'), .git excluded (never touched)."""
+    out, base = {}, Path(base)
+    if not base.is_dir():
+        return out
+    for cur, dirs, files in os.walk(base):
+        c = Path(cur)
+        if c == base and ".git" in dirs:
+            dirs.remove(".git")
+        links = [d for d in dirs if (c / d).is_symlink()]
+        dirs[:] = [d for d in dirs if d not in links]
+        for name in files + links:
+            pth = c / name
+            rel = pth.relative_to(base).as_posix()
+            try:
+                out[rel] = "link:" + os.readlink(pth) if pth.is_symlink() else sha_bytes(pth.read_bytes())
+            except OSError:
+                pass
+    return out
+
+
+def kit_hashes(*roots):
+    out = set()
+    for r in roots:
+        if Path(r).is_dir():
+            for _, f in iter_files(r):
+                out.add(sha_bytes(f.read_bytes()))
+    return out
+
+
+def kept_report(base):
+    base = Path(base)
+    if not base.is_dir():
+        return []
+    lines = [f"Your data is kept in {base}:"]
+    for p in sorted(base.iterdir(), key=lambda x: x.name):
+        if p.name == ".git":
+            n = "?"
+            if shutil.which("git"):
+                r = subprocess.run(["git", "-C", str(base), "rev-list", "--count", "--all"], capture_output=True,
+                                   text=True)
+                n = r.stdout.strip() if r.returncode == 0 else "?"
+            lines.append(f"  .git/  git repository and history ({n} commits), untouched")
+        elif p.is_dir() and not p.is_symlink():
+            lines.append(f"  {p.name}/  {sum(1 for f in p.rglob('*') if f.is_file() or f.is_symlink())} file(s)")
+        else:
+            lines.append(f"  {p.name}")
+    return lines
 
 
 # ------------------------------------------------------------------ the installed products
@@ -468,6 +622,9 @@ class Mothership:
               # what existed before: from the journal when resuming (the killed run may have made folders)
               "dirs_before": (journal or {}).get("dirs_before") or sorted(dir_snapshot(base)),
               "backups_before": (journal or {}).get("backups_before") or sorted(backup_snapshot(base)),
+              # folders already in the base: never removed by uninstall or rollback, even when empty
+              "base_dirs_before": st["base_dirs_before"] if "base_dirs_before" in st else
+              [] if prev or not base.is_dir() else sorted(str(Path(r)) for r, _, _ in os.walk(base)),
               "originals": st["originals"] if "originals" in st else self.save_originals(),
               "claude_access": dict(st.get("claude_access") or {}),
               "base_kept": keep,
@@ -476,6 +633,14 @@ class Mothership:
               sorted(str(f) for f in tool_rules_files() if not f.exists()),
               "done": list((journal or {}).get("done") or [])}
         self.st, self.base = st, base
+        self.pre_archive = None
+        if fresh and base.is_dir() and any(base.iterdir()):
+            try:
+                self.pre_archive, n = archive_base(base, self.a.backup_dir)
+            except OSError as ex:
+                raise Fail(f"could not back up the existing folder {base} first ({ex}); nothing was installed")
+            self.say(f"- backup of the existing folder before installing: {self.pre_archive} ({n} files, mode 600)\n"
+                     f"    restore: {restore_line(self.pre_archive, base)}")
         self.say(("resuming an interrupted install" if resumed else "updating" if update else "installing")
                  + f" The Mothership {VERSION} -> base {base}")
         self.save_journal()
@@ -552,6 +717,7 @@ class Mothership:
         return out
 
     def restore_originals(self, originals):
+        differs = []
         for f, info in sorted((originals or {}).items()):
             f, c = Path(f), Path(info["copy"])
             if not (f.is_file() and c.is_file()):
@@ -567,7 +733,9 @@ class Mothership:
                 f.write_bytes(orig)
                 self.say(f"- {f}: your original layout restored (same settings)")
             else:
+                differs.append(str(f))
                 self.say(f"- {f}: differs from before the install (changed since?); left as it is")
+        return differs
 
     def save_journal(self):
         write_if_changed(mothership_home() / "journal.json", dump(self.st))
@@ -587,6 +755,9 @@ class Mothership:
         test_hook("fail", step)
 
     def steps(self, base, opts, own, use_frugal, flags, keep=None):
+        # Frugal-Bridge's skill files in the base that you changed (compared with the kit that put them there,
+        # before the new one is staged): its install would copy its own over them
+        mine_sk = self.skill_edits(base, self.fbk if self.fbk.is_dir() else ROOT / "components" / FB)
         self.stage()
         self.track("stage")
         probs = verify_lock(self.payload)
@@ -611,6 +782,12 @@ class Mothership:
                 # its own default hosts minus "hermes": a project install for Hermes writes into the user's Hermes
                 # home; the user-level install below covers Hermes properly (rules block + plugin)
                 self.py(self.fbk / "kit" / "setup.py", "install", base, "--hosts", "claude-code,gemini")
+                for f, data in mine_sk.items():
+                    if not f.is_file() or f.read_bytes() != data:
+                        f.parent.mkdir(parents=True, exist_ok=True)
+                        f.write_bytes(data)
+                        self.say(f"- kept your edited {f.relative_to(base)} (the kit's new version was not "
+                                 "copied over it)")
         self.track("frugal-project")
 
         kit = self.frugal_kit_for_base(own)
@@ -634,7 +811,9 @@ class Mothership:
         self.track("claude-access")
 
         self.py(base / "tools" / "brain.py", "connect", "--base", base, *flags, env=env)
-        self.py(base / "tools" / "brain.py", "map", "--root", base)      # redraw with pages the import added
+        rc, out = self.py(base / "tools" / "brain.py", "map", "--root", base, check=False)   # redraw (import)
+        if rc:                                       # a map file of yours is left alone: a note, not a failure
+            self.say("- map: " + " ".join(l for l in out.splitlines() if "left alone" in l))
         self.track("reconnect")
 
         self.systemd(base, opts, flags)
@@ -825,7 +1004,7 @@ class Mothership:
     def rollback(self):
         st = dict(self.st)
         st["own"] = {k: v for k, v in st["own"].items() if v == "installed"}
-        self.undo(st, keep_backups=False, rollback=True)
+        self.undo(st, keep_backups=False, rollback=True, archive=getattr(self, "pre_archive", None))
 
     def uninstall(self):
         base = self.resolve_base(False)
@@ -835,23 +1014,55 @@ class Mothership:
         if not st:
             raise Fail(f"no install record in {base / STATE}; nothing to remove")
         self.base = base
+        name = base.name
         if self.a.purge:
             if st["own"].get("base") != "installed":
                 raise Fail(f"{base} existed before The Mothership; --purge refuses to delete it. Remove it yourself.")
-            ok = self.a.confirm_purge and Path(os.path.abspath(os.path.expanduser(self.a.confirm_purge))) == base
+            if self.a.no_backup:
+                raise Fail("--purge always writes a full backup first; it cannot be used with --no-backup")
+            ok = self.a.yes_purge == name or bool(self.a.confirm_purge) and (
+                Path(os.path.abspath(os.path.expanduser(self.a.confirm_purge))) == base or self.a.confirm_purge == name)
             if not ok and sys.stdin.isatty():
-                ok = input(f"--purge deletes {base} with ALL your pages. Type its full path to confirm: ").strip() \
-                    == str(base)
+                ok = input(f"--purge deletes {base} with ALL your files (a full backup is written first).\n"
+                           f"Type the folder name ({name}) to confirm: ").strip() == name
             if not ok:
-                raise Fail(f"--purge needs confirmation: --confirm-purge {base} (or type the path when asked)")
-        errors = self.undo(st, keep_backups=self.a.keep_backups, rollback=False)
+                raise Fail(f"--purge needs confirmation: type the folder name ({name}) when asked, or pass "
+                           f"--yes-purge-{name}. Nothing was changed.")
+        sd = st.get("systemd") or {}
+        if sd.get("enabled_by_us") and systemctl_ok():
+            systemctl("stop", *sd["enabled_by_us"])      # the watcher must not write while the backup is taken
+        archive = None
+        if not base.is_dir():
+            self.say(f"- backup: {base} does not exist; nothing to back up")
+        elif self.a.no_backup:
+            self.say("- backup: skipped (--no-backup)")
+        else:
+            try:
+                archive, n = archive_base(base, self.a.backup_dir)
+            except OSError as ex:
+                raise Fail(f"backup failed, nothing was uninstalled: {ex}")
+            self.say(f"- backup: {archive} ({n} files, mode 600, includes .git and dotfiles)\n"
+                     f"    restore: {restore_line(archive, base)}")
+        errors = self.undo(st, keep_backups=self.a.keep_backups, rollback=False, archive=archive)
         if self.a.purge and base.exists():
             shutil.rmtree(base)
             self.say(f"- purged {base}")
+        elif base.is_dir():
+            for line in kept_report(base):
+                self.say(line)
+            self.say(f"{base} is a plain folder of Markdown files: open it with any AI tool or editor as it is.\n"
+                     f"To install again: python3 <the-mothership>/install.py --base {shq(base)}  (or "
+                     f"python3 <skeleton-base>/tools/brain.py init {shq(base)}): your files are adopted, never "
+                     "overwritten")
+        elif not self.a.purge:
+            self.say(f"- {base}: nothing of yours was left in it, so its empty folders were removed"
+                     + (" (the full backup above has everything)" if archive else ""))
+        if archive:
+            self.say(f"Full backup from before the uninstall: {archive}\n  restore: {restore_line(archive, base)}")
         self.say("uninstalled" + (f" with {len(errors)} note(s)" if errors else ""))
         return 1 if errors else 0
 
-    def undo(self, st, keep_backups, rollback):
+    def undo(self, st, keep_backups, rollback, archive=None):
         base = Path(st["base"])
         own = st.get("own") or {}
         errors = []
@@ -859,6 +1070,11 @@ class Mothership:
         sbk = payload / "components" / SB if (payload / "components" / SB).is_dir() else ROOT / "components" / SB
         fbk = payload / "components" / FB if (payload / "components" / FB).is_dir() else ROOT / "components" / FB
         bsnap = backup_snapshot(base)
+        before = file_index(base)                       # what was in the base before the products' undo
+        k0 = kits(base)
+        known = kit_hashes(sbk, fbk) | {h for h in ((k0.get("base-folder") or {}).get("created") or {}).values()
+                                        if isinstance(h, str) and len(h) == 64} \
+            | {h for h in ((k0.get("frugal-bridge") or {}).get("template_hashes") or {}).values() if isinstance(h, str)}
 
         def step(label, fn):
             try:
@@ -898,15 +1114,23 @@ class Mothership:
                 write_if_changed(frugal_home() / "global.json", json.dumps(reg, indent=2) + "\n")
                 self.say("- Frugal-Bridge: kit path in global.json restored")
         if own.get("frugal_project") == "installed" and "frugal-bridge" in kits(base):
+            mine = self.skill_edits(base, fbk)            # Frugal-Bridge removes its skill folders whole
             step("Frugal-Bridge: uninstall from the base",
                  lambda: self.py(fbk / "kit" / "setup.py", "uninstall", base))
+            for f, data in mine.items():
+                if not f.exists():
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    f.write_bytes(data)
+                    self.say(f"- kept {f} (you changed this Frugal-Bridge skill file)")
         if own.get("base") == "installed" and "base-folder" in kits(base):
-            step("Skeleton Base: uninstall", lambda: self.py(sbk / "tools" / "brain.py", "uninstall", base))
+            # the full backup was just written (or you said --no-backup): no second one
+            step("Skeleton Base: uninstall", lambda: self.py(sbk / "tools" / "brain.py", "uninstall", base,
+                                                             "--no-backup"))
 
         for f in (base / STATE,):
             if f.exists():
                 f.unlink()
-        self.restore_originals(st.get("originals"))
+        differs = self.restore_originals(st.get("originals"))
         for f in st.get("absent_before") or []:
             t = read(f)
             if t is not None and not t.strip():
@@ -914,16 +1138,28 @@ class Mothership:
                 self.say(f"- removed {f} (empty; it did not exist before)")
         mh0 = Path(st.get("data") or mothership_home())
         if (mh0 / "originals").is_dir():
-            shutil.rmtree(mh0 / "originals")
+            if differs:
+                self.say(f"- kept {mh0 / 'originals'}: your settings files from before the install (some changed "
+                         "since, so they were not put back)")
+            else:
+                shutil.rmtree(mh0 / "originals")
+        dropped = set()
         if not keep_backups:
             made = set(st.get("backups") or []) | (backup_snapshot(base) - bsnap)
             roots = [str(r) for r in backup_roots(base)]
-            for b in sorted(made):
-                if any(b.startswith(r + os.sep) for r in roots) and os.path.exists(b):
-                    shutil.rmtree(b) if os.path.isdir(b) else os.remove(b)
+            made = sorted(b for b in made if any(b.startswith(r + os.sep) for r in roots) and os.path.exists(b))
             if made:
-                self.say(f"- removed {len(made)} backup folder(s) the products made during these runs "
-                         "(--keep-backups keeps them)")
+                try:
+                    arc = archive_paths(made, f"{base.name}-product-backups", self.a.backup_dir)
+                except (OSError, Fail) as ex:
+                    self.say(f"- kept {len(made)} backup folder(s) the products made in place (could not archive "
+                             f"them: {ex})")
+                else:
+                    for b in made:
+                        dropped |= {str(f) for f in ([Path(b)] if os.path.isfile(b) else Path(b).rglob("*"))}
+                        shutil.rmtree(b) if os.path.isdir(b) else os.remove(b)
+                    self.say(f"- moved {len(made)} backup folder(s) the products made during these runs into {arc} "
+                             "(mode 600; --keep-backups leaves them in place)")
         mh = Path(st.get("data") or mothership_home())
         if payload.is_dir():
             shutil.rmtree(payload)       # also when running from it: Python already read this file
@@ -931,19 +1167,70 @@ class Mothership:
             if (mh / f).exists() and (f != "installed.json" or Path((load_json(mh / f) or {}).get("base", ""))
                                       == base):
                 (mh / f).unlink()
+        keep_dirs = set(st.get("base_dirs_before") or [])
         if own.get("base") == "installed" and base.is_dir():
             for r, _, _ in sorted(os.walk(base), key=lambda t: -len(Path(t[0]).parts)):
-                if Path(r) != base:
+                if ".git" in Path(r).relative_to(base).parts:
+                    continue             # a git repository is never touched, not even its empty folders
+                if Path(r) != base and str(Path(r)) not in keep_dirs:
                     try:
-                        os.rmdir(r)      # only empty folders inside the base this install made
+                        os.rmdir(r)      # only empty folders that were not there before the install
                     except OSError:
                         pass
-        self.prune(st.get("created_dirs") or [])
-        if base.is_dir() and own.get("base") == "installed":
+        self.prune([d for d in (st.get("created_dirs") or []) if d not in keep_dirs])
+        self.safety_net(base, before, known, dropped, archive)
+        if rollback and base.is_dir():
             left = [p for p in base.rglob("*") if p.is_file()]
             if left:
-                self.say(f"- kept {base}: {len(left)} file(s) you wrote or changed (--purge deletes them)")
+                self.say(f"- kept {base}: {len(left)} file(s) in it (yours from before, or written by you since)")
         return errors
+
+    def skill_edits(self, base, fbk):
+        """Files under the base's .claude/skills/<Frugal-Bridge skill>/ that differ from the kit's: yours."""
+        out = {}
+        kit = fbk / "kit" / "skills"
+        if not kit.is_dir():
+            return out
+        for sk in sorted(os.listdir(kit)):
+            d = base / ".claude" / "skills" / sk
+            if not d.is_dir():
+                continue
+            for f in d.rglob("*"):
+                if f.is_file() and not f.is_symlink():
+                    k = kit / sk / f.relative_to(d)
+                    if not k.is_file() or k.read_bytes() != f.read_bytes():
+                        out[f] = f.read_bytes()
+        return out
+
+    def safety_net(self, base, before, known, dropped, archive):
+        """After the products' undo: a file that was in the base, is gone now and is not one of the products'
+        own files is put back from the backup archive (a product must never take your data with it)."""
+        now = file_index(base)
+        lost = [rel for rel, h in sorted(before.items())
+                if rel not in now and rel not in OWNED and not rel.startswith(OWNED_PREFIXES) and h not in known
+                and str(base / rel) not in dropped]
+        if not lost:
+            return
+        if not archive:
+            for rel in lost:
+                self.say(f"- WARNING: {base / rel} was removed by a product's uninstall and there is no backup "
+                         "archive to put it back from")
+            return
+        import tarfile
+        with tarfile.open(archive, "r:gz") as tar:
+            for rel in lost:
+                try:
+                    m = tar.getmember(f"{base.name}/{rel}")
+                except KeyError:
+                    continue
+                dst = base / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if m.issym():
+                    os.symlink(m.linkname, dst)
+                else:
+                    dst.write_bytes(tar.extractfile(m).read())
+                    os.chmod(dst, m.mode & 0o777)
+                self.say(f"- put back {dst} from the backup (a product removed it; it is yours)")
 
     def prune(self, created):
         for d in sorted(created, key=lambda x: -len(Path(x).parts)):
@@ -1095,12 +1382,23 @@ def main(argv=None):
     p.add_argument("--timer", action="store_true", help="daily collect timer (also comes with --watch)")
     p.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
     p.add_argument("--force", action="store_true", help="install the vendored Skeleton Base even over a newer one")
-    p.add_argument("--keep-backups", action="store_true", help="uninstall: keep the products' backup folders")
-    p.add_argument("--purge", action="store_true", help="uninstall: also delete the base with your pages")
-    p.add_argument("--confirm-purge", metavar="DIR", help="non-interactive confirmation for --purge")
+    p.add_argument("--keep-backups", action="store_true",
+                   help="uninstall: keep every backup folder the products made (by default only the ones whose "
+                        "files are all back in place byte for byte are removed)")
+    p.add_argument("--no-backup", action="store_true",
+                   help="uninstall: do not write the full backup archive of the base first (not with --purge)")
+    p.add_argument("--backup-dir", metavar="DIR", help=f"where the backup archive goes (default ~/{BACKUPS_DIR})")
+    p.add_argument("--purge", action="store_true",
+                   help="uninstall: also delete the base (asks for its folder name; backs it up first)")
+    p.add_argument("--confirm-purge", metavar="NAME", help="non-interactive confirmation for --purge: the base's "
+                   "folder name or full path (same as --yes-purge-NAME)")
     p.add_argument("--verbose", "-v", action="store_true", help="show the products' own output")
     p.add_argument("--version", action="version", version=f"The Mothership {VERSION}")
+    argv = list(sys.argv[1:] if argv is None else argv)
+    yes_purge = [x for x in argv if x.startswith("--yes-purge-")]
+    argv = [x for x in argv if not x.startswith("--yes-purge-")]
     a = p.parse_args(argv)
+    a.yes_purge = yes_purge[-1][len("--yes-purge-"):] if yes_purge else None
     m = Mothership(a)
     try:
         if a.command in ("install", "update"):

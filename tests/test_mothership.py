@@ -39,7 +39,10 @@ esac
 """
 
 
-def tree(d, skip=()):
+BACKUPS = "skeleton-base-backups"     # the uninstall safety-net archives (checked by their own tests)
+
+
+def tree(d, skip=(BACKUPS,)):
     """rel path -> sha256 (files), 'dir' (folders), 'link:target' (symlinks)."""
     out, d = {}, Path(d)
     if not d.exists():
@@ -578,7 +581,7 @@ class CheckStatusTests(Base):
         self.assertEqual(s1, s2)
         lock = json.loads((REPO / "components.lock").read_text())["components"]
         self.assertEqual(s1.splitlines()[:4], [
-            "The Mothership 1.0.3", f"base: {self.base}",
+            "The Mothership 1.0.4", f"base: {self.base}",
             f"component frugal-bridge: {lock['frugal-bridge']['version']} @ {lock['frugal-bridge']['commit']}",
             f"component skeleton-base: {lock['skeleton-base']['version']} @ {lock['skeleton-base']['commit']}"])
         self.assertIn("connected: ~/.claude/CLAUDE.md", s1)
@@ -784,6 +787,257 @@ class LintWarningTests(Base):
         self.assertIn("WARN lint: wiki/projects/no-front.md: missing frontmatter", out)
         for f in self.rules():
             self.assert_order(f)
+
+
+GIT = shutil.which("git")
+
+
+def full_tree(d, skip=()):
+    """rel -> (kind, sha256 or link target, mode) for everything under d (.git and dotfiles included)."""
+    out, d = {}, Path(d)
+    for root, dirs, files in os.walk(d):
+        for name in dirs + files:
+            p = Path(root) / name
+            r = p.relative_to(d).as_posix()
+            if any(r == x or r.startswith(x + "/") for x in skip):
+                continue
+            if p.is_symlink():
+                out[r] = ("link", os.readlink(p), None)
+            elif p.is_dir():
+                out[r] = ("dir", None, None)
+            else:
+                out[r] = ("file", hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mode & 0o777)
+    return out
+
+
+USER_RULES = "# My own rules\n\nAlways cite the page you used.\n\n"
+# what the products may remove or rewrite in the base on uninstall (their own files); everything else must stay
+PRODUCT_FILES = {".kits.json", ".mothership.json", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore",
+                 ".claude/settings.json", ".gemini/settings.json", "maps/brain.html", ".brain/map.json",
+                 ".brain/search.db", ".brain/collector.lock", ".brain/watch.lock", ".brain/kick"}
+
+
+@unittest.skipUnless(GIT, "needs git")
+class KeepsYourDataTests(Base):
+    """Owner rule: removing The Mothership (or Skeleton Base inside it) never loses the user's data."""
+
+    def git(self, d, *a):
+        r = subprocess.run([GIT, "-C", str(d), "-c", "user.name=Test", "-c", "user.email=test@example.com", *a],
+                           capture_output=True, text=True, env=self.env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def stores(self):
+        enc = "".join(c if c.isalnum() else "-" for c in str(self.home))
+        m = self.home / f".claude/projects/{enc}-proj/memory/MEMORY.md"
+        m.parent.mkdir(parents=True)
+        m.write_text("- The garden needs water on Fridays\n")
+        import sqlite3
+        con = sqlite3.connect(self.home / ".codex/memories_1.sqlite")
+        con.execute("CREATE TABLE stage1_outputs (thread_id TEXT PRIMARY KEY, source_updated_at INTEGER, "
+                    "raw_memory TEXT, rollout_summary TEXT)")
+        con.execute("INSERT INTO stage1_outputs VALUES ('t-1', 1762000000, 'codex memory: beans in May', 's')")
+        con.commit()
+        con.close()
+
+    def user_data(self, b):
+        """Rich user data in an installed base: returns the rels that are the user's (must survive as they are)."""
+        self.stores()
+        self.py(b / "tools/brain.py", "collect", "--base", b)
+        col = [p for p in (b / "raw/inbox/collected").rglob("*.md")]
+        self.assertTrue(any("codex" in str(p) for p in col) and any("claude-code" in str(p) for p in col), col)
+        self.git(b, "init", "-q", "-b", "main")
+        self.git(b, "add", "-A")
+        self.git(b, "commit", "-q", "-m", "one")
+        (b / "wiki/projects/garden.md").write_text(page_text("Garden", "Beans in May."))
+        (b / "wiki/people/kim-example.md").write_text(page_text("Kim Example", "Neighbour."))
+        (b / "raw/docs").mkdir(parents=True, exist_ok=True)
+        (b / "raw/docs/contract.txt").write_text("signed\n")
+        (b / "board/2026-11-11-fix-the-fence.md").write_text("---\ntitle: Fix the fence\nstatus: todo\n---\n")
+        (b / "agents/gardener.md").write_text("# Gardener\nengine: any\n")
+        for rel, add in (("templates/person.md", "\n## Birthday\n"), ("hot.md", "- planting season\n"),
+                         ("progress/agents.log", "2026-11-11 assistant: watered\n"),
+                         ("agents/twin.md", "\nSpeaks softly.\n")):
+            with open(b / rel, "a") as f:
+                f.write(add)
+        self.git(b, "add", "-A")
+        self.git(b, "commit", "-q", "-m", "two")
+        self.py(b / "tools/brain.py", "index", "--root", b)
+        self.py(b / "tools/brain.py", "map", "--root", b)
+        cv = json.loads((b / "maps/brain.canvas").read_text())
+        cv["nodes"][0]["x"] += 500                                           # moved a node in Obsidian
+        (b / "maps/brain.canvas").write_text(json.dumps(cv, indent="\t") + "\n")
+        (b / "AGENTS.md").write_text(USER_RULES + (b / "AGENTS.md").read_text())
+        (b / ".brain/backups/mine").mkdir(parents=True, exist_ok=True)
+        (b / ".brain/backups/mine/old.md").write_text("a copy I keep\n")
+        (b / "notes.bin").write_bytes(bytes(range(256)) * 4)
+        (b / ".obsidian").mkdir(exist_ok=True)
+        (b / ".obsidian/app.json").write_text('{"theme": "moonstone"}\n')
+        os.symlink("hot.md", b / "hot-link.md")
+        sk = next((b / ".claude/skills").iterdir())                          # a Frugal-Bridge skill, edited
+        f = next(x for x in sk.rglob("*") if x.is_file())
+        f.write_text(f.read_text() + "\nmy own note in this skill\n")
+        self.git(b, "add", "-A")
+        self.git(b, "commit", "-q", "-m", "three")
+        mine = ["wiki/projects/garden.md", "wiki/people/kim-example.md", "raw/docs/contract.txt",
+                "board/2026-11-11-fix-the-fence.md", "agents/gardener.md", "templates/person.md", "hot.md",
+                "progress/agents.log", "agents/twin.md", "wiki/index.md", "maps/brain.canvas", ".brain/collector.json",
+                ".brain/backups/mine/old.md", "notes.bin", ".obsidian/app.json", "hot-link.md",
+                f.relative_to(b).as_posix()] + [p.relative_to(b).as_posix() for p in col]
+        return mine
+
+    def archives(self, pattern="skeleton-base-home-2*.tar.gz"):
+        return sorted((self.home / BACKUPS).glob(pattern))
+
+    def assert_restores(self, arc, want):
+        out = self.tmp / ("restored-" + uuid.uuid4().hex[:6])
+        out.mkdir()
+        import tarfile
+        with tarfile.open(arc) as t:
+            t.extractall(out, filter="fully_trusted") if hasattr(tarfile, "data_filter") else t.extractall(out)
+        self.assertEqual(full_tree(out / "skeleton-base-home"), want)
+        self.assertEqual(arc.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(arc.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_rich_base_update_then_uninstall_keeps_everything_and_backup_restores(self):
+        self.user_files()
+        h0 = tree(self.home)
+        self.ms("--yes")
+        b = self.base
+        mine = self.user_data(b)
+        snap = full_tree(b)
+        log0 = self.git(b, "log", "--format=%H %s")
+        self.assertIn("checks: all OK", self.ms("update", "--yes"))          # update: nothing of yours changes
+        for rel in mine:
+            self.assertEqual(full_tree(b).get(rel), snap[rel], f"update changed {rel}")
+        before = full_tree(b)
+        out = self.ms("uninstall")
+        after = full_tree(b)
+        for rel in mine:
+            self.assertEqual(after.get(rel), before[rel], f"uninstall lost or changed {rel}")
+        for rel, v in before.items():                                          # anything else that went: a kit file
+            if rel.startswith(".git/") or after.get(rel) == v or v[0] == "dir":
+                continue
+            kit = [SB_VENDOR / rel, FB_VENDOR / "kit" / rel.replace(".claude/", "", 1)]
+            same_kit = any(k.is_file() and hashlib.sha256(k.read_bytes()).hexdigest() == v[1] for k in kit)
+            self.assertTrue(rel in PRODUCT_FILES or same_kit or rel.startswith((".frugal-bridge/", ".brain/backups/connect-")),
+                            f"removed or changed and not a kit file: {rel}")
+        self.assertEqual({k: v for k, v in after.items() if k.startswith(".git/")},
+                         {k: v for k, v in before.items() if k.startswith(".git/")})
+        self.assertEqual(self.git(b, "log", "--format=%H %s"), log0)
+        self.assertEqual((b / "AGENTS.md").read_text().strip("\n"), USER_RULES.strip("\n"))
+        self.assertIn(f"Your data is kept in {b}:", out)
+        self.assertIn(".git/  git repository and history", out)
+        self.assertIn("your files are adopted, never overwritten", out)
+        arcs = self.archives()
+        self.assertEqual(len(arcs), 1, arcs)
+        self.assertIn(f"Full backup from before the uninstall: {arcs[0]}", out)
+        self.assertIn("restore: mkdir -p", out)
+        self.assert_restores(arcs[0], before)
+        h1 = tree(self.home, skip=(BACKUPS, "skeleton-base-home"))
+        self.assertEqual({k: v for k, v in h1.items() if not k.startswith((".claude/projects", ".codex/memories"))},
+                         {k: v for k, v in h0.items()})                      # the home is back (bar the stores we made)
+
+        # reinstall: the kept data is adopted, nothing lost or doubled
+        kept = full_tree(b)
+        self.assertIn("checks: all OK", self.ms("--yes", "--base", b))
+        now = full_tree(b)
+        for rel in mine:
+            self.assertEqual(now.get(rel), kept[rel], f"reinstall changed {rel}")
+        a = (b / "AGENTS.md").read_text()
+        self.assertTrue(a.startswith(USER_RULES))
+        self.assertEqual(a.count("<!-- base-folder:start"), 1)
+        self.assertEqual(a.count("Always cite the page you used."), 1)
+        n = len(list((b / "raw/inbox/collected").rglob("*.md")))
+        self.py(b / "tools/brain.py", "collect", "--base", b)
+        self.assertEqual(len(list((b / "raw/inbox/collected").rglob("*.md"))), n)   # nothing collected twice
+        self.assertEqual(self.git(b, "log", "--format=%H %s"), log0)
+
+    def test_purge_needs_the_typed_name_and_backs_up_first(self):
+        self.ms("--yes")
+        mine = self.user_data(self.base)
+        t0 = full_tree(self.base)
+        h0 = tree(self.home)
+        for args in (["--purge"], ["--purge", "--yes-purge-other-name"], ["--purge", "--confirm-purge", "wrong"]):
+            out = self.ms("uninstall", *args, rc=2)
+            self.assertIn("--purge needs confirmation", out)
+            self.assertIn("--yes-purge-skeleton-base-home", out)
+            self.assertEqual(full_tree(self.base), t0)
+            self.assertEqual(tree(self.home), h0)
+            self.assertEqual(self.archives(), [])
+        out = self.ms("uninstall", "--purge", "--no-backup", "--yes-purge-skeleton-base-home", rc=2)
+        self.assertIn("cannot be used with --no-backup", out)
+        self.assertEqual(full_tree(self.base), t0)
+        out = self.ms("uninstall", "--purge", "--yes-purge-skeleton-base-home")
+        self.assertFalse(self.base.exists())
+        arcs = self.archives()
+        self.assertEqual(len(arcs), 1)
+        self.assertLess(out.index("- backup: "), out.index("- purged"))
+        self.assert_restores(arcs[0], t0)
+        self.assertTrue(mine)
+
+    def test_no_backup_only_when_given(self):
+        self.ms("--yes")
+        (self.base / "wiki/projects/garden.md").write_text(page_text("Garden", "Beans."))
+        out = self.ms("uninstall", "--no-backup")
+        self.assertIn("backup: skipped (--no-backup)", out)
+        self.assertEqual(self.archives(), [])
+        self.assertEqual((self.base / "wiki/projects/garden.md").read_text(), page_text("Garden", "Beans."))
+
+    def test_backup_failure_stops_the_uninstall(self):
+        self.ms("--yes")
+        t0, h0 = full_tree(self.base), tree(self.home)
+        out = self.ms("uninstall", "--backup-dir", self.base / "inside", rc=2)
+        self.assertIn("inside the base", out)
+        self.assertEqual((full_tree(self.base), tree(self.home)), (t0, h0))
+
+    def test_failed_install_rollback_never_deletes_existing_user_files(self):
+        b = self.base
+        b.mkdir()
+        (b / "notes").mkdir()
+        (b / "notes/diary.md").write_text("dear diary\n")
+        (b / "empty-folder").mkdir()
+        (b / "AGENTS.md").write_text("# rules I wrote\n")
+        (b / "hot.md").write_text("my own hot list\n")
+        (b / ".claude").mkdir()
+        (b / ".claude/settings.json").write_text('{"theme":"dark"}\n')
+        self.git(b, "init", "-q", "-b", "main")
+        self.git(b, "add", "-A")
+        self.git(b, "commit", "-q", "-m", "mine")
+        t0 = full_tree(b)
+        for step in ("base-init", "frugal-project", "connect", "frugal-global", "reconnect"):
+            with self.subTest(step=step):
+                out = self.ms("--yes", rc=3, MOTHERSHIP_TEST_FAIL=step)
+                self.assertIn("rolled back", out)
+                self.assertIn("backup of the existing folder before installing", out)
+                self.assertEqual(full_tree(b), t0)
+        self.assertTrue(self.archives())
+
+    def test_a_product_removing_a_user_file_is_put_back_from_the_backup(self):
+        """The safety net: even a (simulated) faulty product uninstall cannot take a user file with it."""
+        repo = self.copy_repo(self.tmp / "ms-faulty")
+        bp = repo / "components/skeleton-base/tools/brain.py"
+        t = bp.read_text()
+        bad = '        if not me:\n            return ["base-folder is not installed here (nothing changed)"]\n'
+        self.assertIn(bad, t)
+        bp.write_text(t.replace(bad, bad + '        (self.d / "wiki/projects/garden.md").unlink()   # faulty\n', 1))
+        self.py(repo / "tools/update-components.py", "--relock")
+        self.ms("--yes", repo=repo)
+        g = self.base / "wiki/projects/garden.md"
+        g.write_text(page_text("Garden", "Beans."))
+        out = self.ms("uninstall", repo=repo)
+        self.assertIn(f"put back {g} from the backup", out)
+        self.assertEqual(g.read_text(), page_text("Garden", "Beans."))
+
+    def test_disconnect_inside_uninstall_never_touches_base_data(self):
+        self.ms("--yes")
+        mine = self.user_data(self.base)
+        t0 = full_tree(self.base)
+        self.py(self.base / "tools/brain.py", "disconnect", "--base", self.base,
+                FRUGAL_BRIDGE_KIT=str(self.home / ".local/share/the-mothership/payload/components/frugal-bridge"))
+        t1 = full_tree(self.base)
+        self.assertEqual(sorted(k for k in set(t0) | set(t1) if t0.get(k) != t1.get(k)), [".kits.json"])
+        self.assertTrue(mine)
 
 
 class ComponentSuiteTests(Base):

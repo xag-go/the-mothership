@@ -87,12 +87,18 @@ parts are never removed by `uninstall`.
 - Failure on a fresh install: the steps done so far are undone with each product's own uninstall (rollback).
 - Interrupted (killed) install: the journal says what this install owns; the next run continues and the parts it
   made are still treated as its own, not as "found".
-- Uninstall, reverse order: systemd units it enabled; Frugal `uninstall --global`; `brain.py disconnect`;
-  Frugal `uninstall DIR`; `brain.py uninstall DIR`. JSON settings files that existed before are copied first
-  (`$MOTHERSHIP_HOME/originals/`, mode 600, never into the base); when the undo leaves the same JSON in another
-  layout, the original bytes are put back. Then the backups the products made during these runs
-  (`--keep-backups` keeps them), empty folders it created, the payload copy. Pages you wrote stay
-  (`--purge` deletes the whole base after you type its path).
+- Uninstall: stop the units it enabled, then a full backup archive of the base (`~/skeleton-base-backups/`,
+  mode 600, `.git` and dotfiles; a failed backup stops everything; `--no-backup` only when given). Then reverse
+  order: systemd units disabled; Frugal `uninstall --global`; `brain.py disconnect`; Frugal `uninstall DIR` (its
+  skill files you edited are put back); `brain.py uninstall DIR --no-backup` (the archive is already written).
+  JSON settings files that existed before are copied first (`$MOTHERSHIP_HOME/originals/`, mode 600, never into
+  the base); when the undo leaves the same JSON in another layout, the original bytes are put back. Then the
+  backups the products made during these runs are moved into a `NAME-product-backups-TIME.tar.gz`
+  (`--keep-backups` leaves them), empty folders it created are removed (never inside `.git`, never one that was
+  there before), the payload copy goes. Safety net: a file that was in the base, is gone and is not a product
+  file byte for byte is put back from the archive. Pages you wrote stay; the kept data is listed. `--purge`
+  deletes the whole base after you type its folder name (or `--yes-purge-NAME`), backup first, never with
+  `--no-backup`. Rollback of a failed install into a non-empty folder uses a backup taken before installing.
 
 ## 5. Limits
 

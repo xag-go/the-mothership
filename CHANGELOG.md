@@ -1,5 +1,40 @@
 # Changelog
 
+## v1.0.4 (2026-11-11)
+
+Uninstall keeps your data (owner rule: removing The Mothership or Skeleton Base never loses the user's data).
+
+- Skeleton Base 1.3.4 (`64acace`) vendored from GitHub (was `81ca8ed`): its own uninstall backs up first and keeps
+  edited maps, edits inside its blocks and your settings layout.
+- `uninstall` stops the watcher, then writes a full backup of the base (`.git`, dotfiles) to
+  `~/skeleton-base-backups/NAME-YYYYmmdd-HHMMSS.tar.gz` (mode 600, folder 700), checks it, prints its path and a
+  restore command; a failed backup stops the uninstall with nothing changed. `--backup-dir DIR`, `--no-backup`.
+- `--purge` needs the base's folder name typed (or `--yes-purge-NAME`; `--confirm-purge` takes the name or the
+  path), refuses `--no-backup`, and backs up first. Before: it took the full path and deleted with no backup.
+- Fixed data-loss paths found in the audit:
+  - the empty-folder sweep after uninstall/rollback also removed empty folders inside `.git` (e.g. `refs/tags`)
+    and folders that were in the base before the install: now never inside `.git`, never a folder that was there
+    before (`base_dirs_before`);
+  - backup copies made by the products (`.brain/backups/`, `.frugal-bridge/backup/`, `.base-folder/backup/`,
+    `~/.frugal-bridge/backup/`) were deleted: now moved into `NAME-product-backups-TIME.tar.gz` (mode 600);
+  - `update` (Frugal-Bridge's project install) overwrote Frugal-Bridge skill files you edited in
+    `.claude/skills/`, and its uninstall removed them: both now keep your version;
+  - a Skeleton Base map you edited made `update` fail (map exit code): the map step is a note now;
+  - a failed install into an existing non-empty folder: that folder is backed up first; rollback leaves it
+    byte-identical (product backups are moved out);
+  - `originals/` (your settings from before the install) is kept when one of them could not be put back.
+- Safety net: after the products' uninstall, any file that was in the base, is gone and is not a product file byte
+  for byte is put back from the backup archive.
+- After uninstall: what was kept and where (per folder, git history) and how to re-open or reinstall.
+- Tests: 51 (50 by default + the opt-in real Claude Code test). 7 new: a rich base (pages, raw incl. collected
+  and sqlite-sourced items, cards, edited template/agent/map/Frugal skill, `hot.md`, `progress/agents.log`, user
+  text in `AGENTS.md`, 3 git commits, `.brain` state, unknown files, a symlink) through `update` and `uninstall`:
+  every user file byte-identical, git intact, archive mode 600 restores the exact tree, home back, reinstall adopts
+  without loss or duplication; purge without the name refuses, with it backs up first; `--no-backup`; backup
+  failure stops; failed-install rollback keeps an existing folder byte-identical (5 steps); a faulty product
+  uninstall is caught by the safety net; disconnect changes nothing in the base but `.kits.json`. Home trees in
+  tests skip `~/skeleton-base-backups` (checked by these tests).
+
 ## v1.0.3 (2026-11-11)
 
 - Skeleton Base 1.3.3 (`81ca8ed`) and Frugal-Bridge 6 (`4920444`) vendored from GitHub (were `d036212` and
