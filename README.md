@@ -137,7 +137,9 @@ Removing The Mothership (or Skeleton Base) never deletes anything of yours.
 ## FAQ
 
 **Does it work with my AI tool?** Yes, with any tool, model or provider. Tools that read a user-level rules file
-get the pointer automatically. A tool you install later is connected to the base by the watcher; run
+get the pointer automatically, and tools that keep their agent in the folder it started in get the base added to
+their own allowed folders, so they read and write it from anywhere (Skeleton Base's README has the tool-by-tool
+matrix). Nothing in the install needs a model or a provider. A tool you install later is connected to the base by the watcher; run
 `install.py` again to give it the Frugal-Bridge rules too. Tools that only take
 pasted instructions (chat apps): run `python3 ~/skeleton-base-home/tools/brain.py brief` and paste the output. No
 tool or agent name is required anywhere.

@@ -25,7 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 ROOT = Path(__file__).resolve().parent
 LOCK = "components.lock"
 STATE = ".mothership.json"
@@ -820,42 +820,14 @@ class Mothership:
         self.track("systemd")
 
     def claude_access(self, base):
-        """Claude Code only reads files inside its working folder and its additionalDirectories. The base's
-        pointer block tells it to read the base from any folder, so the base is added there (one list entry,
-        recorded, removed again on uninstall). Only when the base is connected to Claude Code."""
-        conn = (kits(base).get("base-folder") or {}).get("connect") or {}
-        f = json_configs()[0]
-        rel = (Path(os.environ.get("CLAUDE_CONFIG_DIR") or home() / ".claude") / "CLAUDE.md")
-        try:
-            rel = rel.relative_to(Path(conn.get("home") or home())).as_posix()
-        except ValueError:
-            rel = str(rel)
-        if rel not in (conn.get("blocks") or {}):
-            return
-        t = read(f)
-        try:
-            data = json.loads(t) if t and t.strip() else {}
-        except json.JSONDecodeError:
-            self.say(f"- {f} is not valid JSON: Claude Code access to the base not added (fix the file, re-run)")
-            return
-        ca = self.st.setdefault("claude_access", {})
-        if ca.get("file") and ca["file"] != str(f):
-            return
-        perms = data.get("permissions")
-        if perms is None:
-            perms = data["permissions"] = {}
-            ca.setdefault("created_permissions", True)
-        lst = perms.get("additionalDirectories")
-        if lst is None:
-            lst = perms["additionalDirectories"] = []
-            ca.setdefault("created_list", True)
-        ca["file"], ca["dir"] = str(f), str(base)
-        if str(base) not in lst:
-            lst.append(str(base))
-            ca["added"] = True
-            write_if_changed(f, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-            self.say(f"- Claude Code: the base is readable from any folder (permissions.additionalDirectories)")
-        ca.setdefault("added", False)
+        """Tool folder access is Skeleton Base's job since its 1.3.5: `connect` adds the base to every tool's own
+        allow list (Claude Code permissions.additionalDirectories, Codex writable_roots, ...), records it and removes
+        it on disconnect. An entry The Mothership 1.0.5 or older added itself is handed over: removed here, so the
+        reconnect step right after adds it again as the base's own (one entry, one owner)."""
+        if (self.st.get("claude_access") or {}).get("added"):
+            self.claude_access_undo(self.st)
+            self.say("- Claude Code access: now kept by Skeleton Base's connect (handed over)")
+        self.st["claude_access"] = {}
 
     def claude_access_undo(self, st):
         ca = st.get("claude_access") or {}
@@ -1303,12 +1275,17 @@ class Mothership:
                     probs.append(f"{f}: Frugal-Bridge block comes before the base block (want base first)")
                 elif len(FRUGAL_START_RE.findall(t)) != 1:
                     probs.append(f"{f}: more than one Frugal-Bridge block")
-        ca = st.get("claude_access") or {}
-        if ca.get("added"):
-            lst = ((load_json(ca["file"], {}) or {}).get("permissions") or {}).get("additionalDirectories") or []
-            if ca["dir"] not in lst:
-                probs.append(f"{ca['file']}: the base is not in permissions.additionalDirectories (Claude Code "
+        conn = (kits(base).get("base-folder") or {}).get("connect") or {}
+        cs = Path(conn.get("home") or home()) / ".claude" / "settings.json"
+        if ".claude/CLAUDE.md" in (conn.get("blocks") or {}) and cs.is_file():
+            lst = ((load_json(cs, {}) or {}).get("permissions") or {}).get("additionalDirectories") or []
+            if not any(isinstance(x, str) and Path(x).expanduser().resolve() == Path(base).resolve() for x in lst):
+                probs.append(f"{cs}: the base is not in permissions.additionalDirectories (Claude Code "
                              "cannot read it from other folders): run install again")
+        for r in sorted(conn.get("access") or {}):        # the other tools' allow lists (Codex, Gemini, ...)
+            f = Path(conn.get("home") or home()) / r
+            if f.is_file() and str(base) not in (read(f) or ""):
+                probs.append(f"{f}: the base is not in this tool's allowed folders: run install again")
         sd = st.get("systemd") or {}
         if sd.get("enabled_by_us") and systemctl_ok():
             for u in sd["enabled_by_us"]:

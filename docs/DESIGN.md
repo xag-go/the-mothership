@@ -64,9 +64,12 @@ Frugal-Bridge is never placed inside the base (the two products stay separate).
    uses the base slots, puts its block after the base block)
 6. write `"kit"` into Frugal-Bridge's `global.json` (pointing at the payload copy) so Skeleton Base's watcher can
    re-run Frugal's setup later without anybody setting `FRUGAL_BRIDGE_KIT`
-7. Claude Code: add the base to `permissions.additionalDirectories` in `~/.claude/settings.json` (recorded,
-   removed on uninstall). Without it a real `claude -p` started in another folder was refused reading the base
-   ("outside this session's allowed directory"); with it, it answered from the base.
+7. Tool folder access: done by Skeleton Base's `connect` (since its 1.3.5) for every tool that walls its agent
+   into the starting folder (Claude Code `permissions.additionalDirectories`, Codex `writable_roots`, Gemini CLI /
+   Qwen Code `context.includeDirectories`, opencode `external_directory`), recorded and removed by the base.
+   The Mothership adds nothing itself; an entry its 1.0.5 or older added is handed over to the base here (removed,
+   re-added by step 8 as the base's own: one entry, one owner). `check` reports a tool whose list lost the base.
+   Without the entry a real `claude -p` started in another folder was refused reading the base.
 8. `connect` again, then `map` (a fixpoint: the base records the final state of `~/.claude/settings.json`; without this a
    second install run would not be byte-identical; `map` redraws pages an import added)
 9. systemd: `--yes` runs `systemctl --user daemon-reload && systemctl --user enable --now ...` when

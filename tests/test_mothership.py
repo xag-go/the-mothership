@@ -220,6 +220,41 @@ class InstallTests(Base):
         self.assertIn("uninstalled", out)
         self.assertEqual(tree(self.home), t0)
 
+    def test_tool_folder_access_kept_by_the_base_one_entry_old_record_handed_over(self):
+        t0 = tree(self.home)
+        self.ms("--yes")
+        b = str(self.base)
+        cs = self.home / ".claude/settings.json"
+        self.assertEqual(json.loads(cs.read_text())["permissions"]["additionalDirectories"], [b])   # once, not twice
+        conn = json.loads((self.base / ".kits.json").read_text())["kits"]["base-folder"]["connect"]
+        self.assertTrue(conn["hooks"]["dir_added"], "the base's connect owns the entry")
+        self.assertIn(f"writable_roots = [{json.dumps(b)}]", (self.home / ".codex/config.toml").read_text())
+        self.assertEqual(json.loads((self.home / ".gemini/settings.json").read_text())["context"]["includeDirectories"],
+                         [b])
+        self.assertEqual(json.loads((self.base / ".mothership.json").read_text())["claude_access"], {})
+        self.assertIn("check: OK", self.ms("check"))
+        # an install by The Mothership 1.0.5: it had added the entry itself, the base did not own it
+        k = json.loads((self.base / ".kits.json").read_text())
+        h = k["kits"]["base-folder"]["connect"]["hooks"]
+        for key in ("dir", "dir_added", "had_dirs_key"):
+            h.pop(key)
+        (self.base / ".kits.json").write_text(json.dumps(k, indent=2) + "\n")
+        st = json.loads((self.base / ".mothership.json").read_text())
+        st["claude_access"] = {"file": str(cs), "dir": b, "added": True, "created_list": True}
+        (self.base / ".mothership.json").write_text(json.dumps(st, indent=2) + "\n")
+        out = self.ms("--yes")
+        self.assertIn("handed over", out)
+        self.assertEqual(json.loads(cs.read_text())["permissions"]["additionalDirectories"], [b])
+        conn = json.loads((self.base / ".kits.json").read_text())["kits"]["base-folder"]["connect"]
+        self.assertTrue(conn["hooks"]["dir_added"])
+        self.assertIn("check: OK", self.ms("check"))
+        (self.home / ".codex/config.toml").write_text("")                  # the check sees a lost entry
+        self.assertIn("not in this tool's allowed folders", self.ms("check", rc=1))
+        self.ms("--yes")
+        self.assertIn("check: OK", self.ms("check"))
+        self.ms("uninstall")
+        self.assertEqual(tree(self.home), t0)
+
     def test_uninstall_fresh_home_byte_identical_including_folders(self):
         t0 = tree(self.home)
         self.ms("--yes")

@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.6 (2026-11-11)
+
+- Skeleton Base 1.3.5 (`e66997f`) vendored from GitHub (was `64acace`): `connect` lets every tool read and write
+  the base from any folder through its own allow list (Claude Code, Codex, Gemini CLI, Qwen Code, opencode),
+  recorded and removed by the base.
+- The Mothership no longer adds the base to Claude Code's `additionalDirectories` itself (it was Claude-only and
+  could leave two owners for one entry). An entry an older Mothership added is handed over to the base on the
+  next install run; uninstall of old records still removes it. `check` now checks every tool's allow list the base
+  recorded.
+- Test: one entry, owned by the base, old record handed over, `check` sees a lost entry, uninstall gives the home
+  back byte-identical (52 tests).
+
 ## v1.0.5 (2026-11-11)
 
 - Frugal-Bridge `3c86a64` vendored from GitHub (was `4920444`): its uninstall never loses user data (only unchanged own files removed, edited blocks saved to `kept/`) and leaves no empty leftovers.
