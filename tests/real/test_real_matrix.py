@@ -150,7 +150,20 @@ class RealMatrix(unittest.TestCase):
         self.res = {"checks": {}, "evidence": {}}
 
     def tearDown(self):
+        pid_file = self.home / ".hermes" / "gateway.pid"   # Hermes starts an idle-exit gateway for its home: stop it
+        try:                                               # first, or it writes into the folder after it is removed
+            pid = int(json.loads(pid_file.read_text()).get("pid"))
+            env_of = Path(f"/proc/{pid}/environ").read_bytes()        # only that home's gateway (pids get reused)
+            if f"HOME={self.home}".encode() not in env_of and f"={self.home}/.hermes".encode() not in env_of:
+                raise ValueError("not this test's gateway")
+            os.kill(pid, 15)
+            for _ in range(50):
+                os.kill(pid, 0)
+                time.sleep(0.1)
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
         self._td.cleanup()                           # also the copied credentials
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def env(self, **kw):
         e = {k: v for k, v in os.environ.items() if k not in SCRUB and not k.startswith("MOTHERSHIP_")}
