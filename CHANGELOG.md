@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.1.1 (2026-11-11)
+
+- Real tool x provider matrix: `tests/real/test_real_matrix.py` (opt-in `MOTHERSHIP_REAL=1`, never in CI). Each row
+  runs a real tool in a fresh temporary HOME (its own minimal config and login or key), `install.py --yes`, real
+  prompts from an unrelated folder, `collect`, `uninstall`, and checks from files: finds the base, writes it, its
+  memory collected, Frugal rules + tier config vs `tiers.json`, HOME byte-identical except the tool's own files, and
+  a real cheap-tier helper call where the tool has one. Results: [docs/REAL-MATRIX.md](docs/REAL-MATRIX.md).
+- Skeleton Base 1.4.1 (`e282bde`) and Frugal-Bridge `a1e1ef9` vendored from GitHub, with the fixes those runs
+  found: Claude Code helper tiers use the table's exact model (the `haiku` alias ran an older Haiku); the base's save
+  step is one allowed command; "remember" goes to the base first; empty memory files are not collected.
+
 ## v1.1.0 (2026-11-11)
 
 - Skeleton Base 1.4.0 (`e15a9a9`) vendored from GitHub (was 1.3.5 `e66997f`): one tool table (26 rows) for

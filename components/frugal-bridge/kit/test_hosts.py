@@ -200,10 +200,16 @@ def test_tier_values_claude(home, monkeypatch):
     assert install("claude-code") == 0
     got = {n: fm(read(home, f".claude/agents/{n}.md")) for n in ("frugal-cheap", "frugal-mid", "frugal-mid-writing", "frugal-top")}
     assert {n: (v["model"], v["effort"]) for n, v in got.items()} == {
-        "frugal-cheap": ("haiku", "medium"), "frugal-mid": ("sonnet", "medium"),
-        "frugal-mid-writing": ("sonnet", "high"), "frugal-top": ("opus", "medium")}
+        "frugal-cheap": ("claude-haiku-5-5", "medium"), "frugal-mid": ("claude-sonnet-5-5", "medium"),
+        "frugal-mid-writing": ("claude-sonnet-5-5", "high"), "frugal-top": ("claude-opus-5-5", "medium")}
+    # the exact model of tiers.json (Anthropic id form), never the family alias: a real run showed Claude Code's
+    # `haiku` alias running an older Haiku than the table's cheap model
+    for n, v in got.items():
+        assert v["model"] == expect(n.replace("frugal-", "").replace("mid-writing", "mid"))[0].replace(".", "-")
     txt = read(home, ".claude/CLAUDE.md")
-    assert "`frugal-cheap` = haiku, effort medium" in txt and "`frugal-mid-writing` = sonnet, effort high" in txt
+    assert "`frugal-cheap` = claude-haiku-5-5, effort medium" in txt
+    assert "`frugal-mid-writing` = claude-sonnet-5-5, effort high" in txt
+    assert "older model" in txt                       # the alias fallback is named as second choice
 
 
 def test_tier_values_codex(home, monkeypatch):

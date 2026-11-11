@@ -374,7 +374,9 @@ def tool_family(t):
 def model_for(t, family, prov, entry_id):
     """The model value a tool's own setting takes for a table entry."""
     if t == "claude-code":
-        return claude_alias(entry_id)
+        # the exact model (Anthropic id form), not the family alias: Claude Code's `haiku` alias can run an older
+        # Haiku than the table's cheap model (real run: alias -> claude-haiku-4-5, table -> claude-haiku-5.5)
+        return entry_id.replace(".", "-")
     if t == "junie" and family == "anthropic":
         return claude_alias(entry_id)          # Junie's docs use the aliases (model: "sonnet")
     if t in ("opencode", "kilo"):
@@ -604,7 +606,8 @@ def tier_rules(t, table, rows):
     use = "; ".join(f"`{n}` = {m}" + (f", effort {e}" if e else "") for n, m, e, _ in rows)
     extra = ""
     if kind == "claude-agents":
-        extra = " (or pass `model: haiku / sonnet / opus` on the Agent tool)"
+        extra = (" (prefer the subagent: the Agent tool's `model: haiku / sonnet / opus` alias can pick an older "
+                 "model)")
     if kind == "goose-recipes":
         extra = " (use the recipe by name)"
     tail = "" if any(e for _, _, e, _ in rows) else " Effort is not per helper here."

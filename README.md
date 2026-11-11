@@ -81,6 +81,9 @@ it finds (a tool counts as installed when its program is on `PATH` or its own co
 - what Frugal-Bridge sets up in each tool (rules, hooks / plugin, output filter, helper tier model + effort, usage
   log, proxy): [Frugal-Bridge's matrix](components/frugal-bridge/adapter/README.md#every-tool-what-install---global-sets-up-the-matrix)
 
+Real runs of the whole install per tool and provider (opt-in, they need the tools and keys) live in
+`tests/real/`; their last results, with what each tool leaves behind, are in [docs/REAL-MATRIX.md](docs/REAL-MATRIX.md).
+
 ## Check, status, update
 
 ```sh
@@ -176,6 +179,7 @@ setups in the right order.
 python3 -m unittest -v                                # the whole suite (isolated temp HOMEs; touches nothing real)
 MOTHERSHIP_BLOCKED_WORDS=~/my-words.txt python3 -m unittest tests.test_mothership.PublicTests
 MOTHERSHIP_REAL_CLAUDE=1 python3 -m unittest tests.test_mothership.RealToolTests   # real `claude -p` cold start
+MOTHERSHIP_REAL=1 python3 -m unittest tests.real.test_real_matrix -v    # real tool x provider rows (docs/REAL-MATRIX.md)
 python3 tools/update-components.py                    # re-vendor both from GitHub, rewrite components.lock
 MOTHERSHIP_BLOCKED_WORDS=~/my-words.txt python3 tools/update-components.py   # leave out upstream files with those words
 python3 tools/update-components.py --check            # verify the vendored files

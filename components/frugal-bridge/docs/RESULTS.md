@@ -951,3 +951,11 @@ Readings:
 - Fix: a re-run that finds the file changed since Frugal's last write marks the recorded text `orig_stale`; uninstall
   then removes only Frugal's own keys/hooks (and removes a file left empty unless the user's original was empty).
 - Regression test `test_global_rerun_after_base_disconnect_never_brings_base_entries_back`. Tests 236/236.
+
+### 2.39 Claude Code helper tiers use the exact model, not the alias (2026-11-11)
+- Real run (The Mothership real matrix, Claude Code + Anthropic, isolated HOME): the `frugal-cheap` subagent with
+  `model: haiku` ran `claude-haiku-4-5-20251001` (its transcript), while `tiers.json` cheap = Claude Haiku 5.5.
+  Claude Code's family alias can lag the table.
+- Fix: `~/.claude/agents/frugal-*.md` get the table's exact id in Anthropic form (`claude-haiku-5-5`,
+  `claude-sonnet-5-5`, `claude-opus-5-5`); the rules paragraph says to prefer the subagent over the Agent tool's alias.
+- Test `test_tier_values_claude` checks the ids against tiers.json. Tests 236/236.
