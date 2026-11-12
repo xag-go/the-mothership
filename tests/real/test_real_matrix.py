@@ -147,6 +147,7 @@ class RealMatrix(unittest.TestCase):
         self.base = self.home / "skeleton-base-home"
         self.extra_path = []
         self.secret_env = {}
+        self.fixed_env = {}                          # e.g. CLAUDE_CONFIG_DIR for the relocated-dir row
         self.res = {"checks": {}, "evidence": {}}
 
     def tearDown(self):
@@ -169,6 +170,7 @@ class RealMatrix(unittest.TestCase):
         e = {k: v for k, v in os.environ.items() if k not in SCRUB and not k.startswith("MOTHERSHIP_")}
         e.update(HOME=str(self.home), PATH=os.pathsep.join([str(self.bin), *self.extra_path, str(self.sysbin)]),
                  LANG="C.UTF-8", NO_COLOR="1", TERM="dumb")
+        e.update(self.fixed_env)
         e.update(self.secret_env)
         e.update(kw)
         return e
@@ -409,6 +411,59 @@ class RealMatrix(unittest.TestCase):
                             r"^\.local/state/claude", r"^\.claude/\.credentials\.json$", r"^\.local/share/claude",
                             r"^\.claude/\.last-cleanup$", r"^\.claude/skills/synced/"],
                  rules_file=".claude/CLAUDE.md", tier_check=tiers, delegation=delegation)
+
+    def test_claude_relocated_config(self):
+        """Claude Code with its config dir moved by its own setting into the base (CLAUDE_CONFIG_DIR =
+        BASE/engines/claude, .claude.json inside it): both products wire that dir, ~/.claude is never made, the
+        tool's secrets stay out of git. Runs on the cheap tier's model (cost)."""
+        claude = self.link_tool("claude")
+        cred = Path.home() / ".claude" / ".credentials.json"
+        if os.environ.get("CLAUDE_CONFIG_DIR"):
+            cred = Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".credentials.json"
+        if not cred.is_file():
+            self.skipTest("NOT RUN: no Claude Code credentials file")
+        cfg = self.base / "engines" / "claude"
+        cfg.mkdir(parents=True)
+        shutil.copy2(cred, cfg / ".credentials.json")
+        self.fixed_env["CLAUDE_CONFIG_DIR"] = str(cfg)
+        model = os.environ.get("MOTHERSHIP_REAL_CLAUDE_MODEL") or TIERS["cheap"]["anthropic"]["id"].replace(".", "-")
+        self.res["main_model_claude"] = model
+        rel_cfg = str(cfg.relative_to(self.home))
+
+        def prompt(q):
+            rc, out, secs = self.run_cmd([claude, "-p", q, "--model", model, "--permission-mode", "acceptEdits",
+                                          "--output-format", "json"])
+            d = None
+            for ln in reversed(out.strip().splitlines()):     # a notice line may follow the JSON result
+                try:
+                    d = json.loads(ln)
+                    break
+                except ValueError:
+                    continue
+            if not isinstance(d, dict):
+                return rc, out, secs
+            self.res.setdefault("cost_usd", []).append(d.get("total_cost_usd"))
+            return rc, str(d.get("result", "")), secs
+
+        def tiers():
+            ok, ev = self.agent_files_check(f"{rel_cfg}/agents", "anthropic", model_of=lambda mid: mid.replace(".", "-"))
+            home_clean = not (self.home / ".claude").exists() and not (self.home / ".claude.json").exists()
+            subprocess.run(["git", "-C", str(self.base), "init", "-q"], capture_output=True)
+            ign = {p: subprocess.run(["git", "-C", str(self.base), "check-ignore", "-q", "--no-index", p]).returncode == 0
+                   for p in ("engines/claude/.credentials.json", "engines/claude/.claude.json",
+                             "engines/claude/projects/x/s.jsonl")}
+            kept = subprocess.run(["git", "-C", str(self.base), "check-ignore", "-q", "--no-index",
+                                   "engines/claude/CLAUDE.md"]).returncode == 1
+            shutil.rmtree(self.base / ".git", ignore_errors=True)
+            self.mark("f_no_home_dir", home_clean, {"~/.claude": (self.home / ".claude").exists(),
+                                                    "~/.claude.json": (self.home / ".claude.json").exists()})
+            self.mark("g_secrets_ignored", all(ign.values()) and kept, {"ignored": ign, "rules_kept": kept})
+            return ok, ev
+
+        self.row("claude-relocated-config", prompt, own_files=[r"^\.cache/", r"^\.local/state/claude",
+                                                               r"^\.local/share/claude"],
+                 rules_file=f"{rel_cfg}/CLAUDE.md", tier_check=tiers)
+        self.assertFalse((self.home / ".claude").exists(), "~/.claude was made after all")
 
     def hermes_row(self, name, provider, model, own_creds, delegation_test):
         hermes = self.link_tool("hermes")

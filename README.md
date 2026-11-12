@@ -35,8 +35,16 @@ python3 the-mothership/install.py --base ~/notes/brain     # another folder for 
 python3 the-mothership/install.py --no-frugal              # only the knowledge base
 python3 the-mothership/install.py --no-watch [--timer]     # no watcher service (or only a daily timer)
 python3 the-mothership/install.py --mcp                    # also register the base's MCP server in each tool
+python3 the-mothership/install.py --claude-config-dir ~/worker-claude   # one more config dir of a tool (repeatable;
+                                                           # any tool: --tool-dir codex=DIR), kept for re-runs
 python3 the-mothership/install.py --verbose                # also show both products' own output
 ```
+
+A tool whose config folder lives somewhere else by its own setting (Claude Code `CLAUDE_CONFIG_DIR`, Codex
+`CODEX_HOME`, Hermes `HERMES_HOME`, ...), for example inside the base as `engines/<tool>/`, is wired there: both
+products follow the variable, and the default folder (`~/.claude`) is never made. Skeleton Base's
+`brain.py engine adopt TOOL` moves a tool's folder into the base and sets the variable; `brain.py doctor` lists every
+AI folder and code repo and what is still outside the base.
 
 A base path with spaces works, with or without Frugal-Bridge (both products write and read it quoted, for
 example `Path: "/home/you/my notes"`). Only a Frugal-Bridge that cannot read a quoted path (one without

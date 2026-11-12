@@ -4,6 +4,8 @@
 present, key-level JSON merge for host settings, idempotent, reversible, backups of every touched file.
 
   python3 setup.py install   --global [--hosts auto|<tool>,<tool>...] [--base DIR]   (tools: kit/hosts.py)   (every project)
+        [--claude-config-dir DIR] [--tool-dir TOOL=DIR]   (repeatable: a second config dir of a tool; also read from
+        ~/.config/ai-tool-dirs.d/*.json and ~/.config/claude-code-dirs.d/*.json, and remembered in global.json)
   python3 setup.py uninstall --global
   python3 setup.py check     --global
   python3 setup.py report    [days]      (token usage of every tool Frugal logs: hooks, plugins, proxy)
@@ -588,16 +590,45 @@ def frugal_home():
     return os.environ.get("FRUGAL_HOME") or os.path.expanduser("~/.frugal-bridge")
 
 
+EXTRA_TOOLS = ("claude-code", "codex", "gemini", "opencode", "hermes")   # tools whose config dir can be wired more than once
+
+
 def global_targets():
-    """tool -> (home dir, user-level instruction file, binary). Homes follow each tool's own env override."""
-    e, h = os.environ.get, os.path.expanduser
-    return {
-        "claude-code": (e("CLAUDE_CONFIG_DIR") or h("~/.claude"), "CLAUDE.md", "claude"),
-        "codex": (e("CODEX_HOME") or h("~/.codex"), "AGENTS.md", "codex"),
-        "gemini": (h("~/.gemini"), "GEMINI.md", "gemini"),
-        "opencode": (h("~/.config/opencode"), "AGENTS.md", "opencode"),
-        "hermes": (e("HERMES_HOME") or h("~/.hermes"), "SOUL.md", "hermes"),
-    }
+    """tool -> (home dir, user-level instruction file, binary). Homes follow each tool's own env override (hosts.root):
+    CLAUDE_CONFIG_DIR, CODEX_HOME, GEMINI_CLI_HOME (parent of .gemini/), XDG_CONFIG_HOME (opencode), HERMES_HOME."""
+    return {t: (HOSTS.root(t), HOSTS.H[t]["rules"][len("@root/"):], HOSTS.H[t]["bins"][0]) for t in EXTRA_TOOLS}
+
+
+def dir_registry(log):
+    """(tool, dir) pairs from the shared registry other installers write: every ~/.config/ai-tool-dirs.d/*.json (each
+    entry names its tool) and ~/.config/claude-code-dirs.d/*.json (tool = claude-code). A file is one object or a list
+    of objects {"tool", "dir", "owner", "purpose"}. Bad or missing files are skipped with a note, never a crash."""
+    out, home = [], os.path.expanduser("~")
+    for sub, default_tool in ((".config/ai-tool-dirs.d", None), (".config/claude-code-dirs.d", "claude-code")):
+        d = os.path.join(home, sub)
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for f in names:
+            if not f.endswith(".json"):
+                continue
+            p = os.path.join(d, f)
+            try:
+                data = json.loads(read(p) or "")
+            except (ValueError, OSError):
+                log.append(f"skipped {p}: not valid JSON")
+                continue
+            for item in (data if isinstance(data, list) else [data]):
+                if not isinstance(item, dict):
+                    log.append(f"skipped an entry in {p}: not an object")
+                    continue
+                t, dr = item.get("tool") or default_tool, item.get("dir")
+                if not isinstance(dr, str) or not dr.strip() or not isinstance(t, str):
+                    log.append(f'skipped an entry in {p}: needs "tool" and "dir"')
+                    continue
+                out.append((t, dr.strip()))
+    return out
 
 
 GLOBAL_NOTE_BASE = """
@@ -749,15 +780,20 @@ class GlobalSetup(Setup):
             return HOSTS.expand(t, ov)
         return HOSTS.expand(t, h["rules"])
 
-    def plan_rules(self, sel):
-        """{tool: file} and {tool: (other tool, file)} for tools that already load another selected tool's file."""
-        files = {t: self.rules_target(t) for t in sel}
+    def plan_rules(self, insts):
+        """{instance: file} and {instance: (other instance, file)} for instances that already load another wired
+        instance's file (instances = (key, tool, dir or None) as install() builds them)."""
+        files = {}
+        for ik, t, home in insts:
+            with HOSTS.home_override(t, home):
+                files[ik] = self.rules_target(t)
         via = {}
-        for t in sel:
-            reads = [HOSTS.expand(t, x) for x in HOSTS.H[t].get("reads") or []]
-            for u in sel:
-                if u != t and u not in via and files.get(u) and files[u] in reads and not HOSTS.H[u].get("policy"):
-                    via[t] = (u, files[u])
+        for ik, t, home in insts:
+            with HOSTS.home_override(t, home):
+                reads = [HOSTS.expand(t, x) for x in HOSTS.H[t].get("reads") or []]
+            for uk, u, _ in insts:
+                if uk != ik and uk not in via and files.get(uk) and files[uk] in reads and not HOSTS.H[u].get("policy"):
+                    via[ik] = (uk, files[uk])
                     break
         return files, via
 
@@ -893,6 +929,32 @@ class GlobalSetup(Setup):
         elif new != cur:
             write(path, new)
 
+    def wanted_dirs(self, r):
+        """(tool, dir) pairs wired besides each tool's default dir: --claude-config-dir / --tool-dir, the shared registry
+        files (dir_registry), and dirs an earlier run recorded in global.json. Duplicates and the default dir drop out."""
+        cand = list(getattr(self, "extra_dirs_arg", None) or [])
+        cand += dir_registry(self.log)
+        cand += [(t, d) for t, ds in (r.get("config_dirs") or {}).items() for d in ds]
+        out = []
+        for t, d in cand:
+            if not isinstance(t, str) or t not in EXTRA_TOOLS:
+                self.log.append(f"skipped config dir for {t!r}: only {', '.join(EXTRA_TOOLS)} take a second dir")
+                continue
+            d = os.path.abspath(os.path.expanduser(d))
+            if d == HOSTS.root(t):
+                continue                                   # the tool's default dir: already wired
+            if (t, d) not in out:
+                out.append((t, d))
+        return out
+
+    @staticmethod
+    def _tag(info, t, home):
+        """Ledger entry of one wired instance: its tool, and its dir when it is not the tool's default one."""
+        info["tool"] = t
+        if home:
+            info["home"] = home
+        return info
+
     # ------------------------------------------------------------ install
     def install(self, hosts=None, hermes_home=None):
         os.makedirs(self.d, exist_ok=True)
@@ -913,10 +975,23 @@ class GlobalSetup(Setup):
                                 f"{', '.join(HOSTS.expand(t, x) for x in HOSTS.H[t].get('proof') or []) or 'its own config files'})")
         kept_only = set()      # installed earlier, tool not found now: keep its rules block current, add nothing
         for t in list(tools) + list((r.get("copied") or {})):
-            if t in HOSTS.H and t not in sel:
+            if t in HOSTS.H and t not in sel:      # "tool@dir" keys (extra dirs) are wired below, never here
                 sel.append(t); kept_only.add(t)
                 self.log.append(f"kept current: {t} (installed earlier; tool not found now, so only its rules block "
                                 f"is refreshed — nothing new added)")
+        # every (instance key, tool, dir or None for the default dir) to wire: the default dir of each tool, then each
+        # extra dir of a tool (same block, hooks and settings as its default dir)
+        extras = self.wanted_dirs(r)
+        r["config_dirs"] = {}
+        for t, d in extras:
+            r["config_dirs"].setdefault(t, []).append(d)
+            if not os.path.isdir(d):
+                self.remember_dirs(os.path.join(d, "x"))
+                os.makedirs(d, exist_ok=True)
+                self.log.append(f"{t}: created {d} (a second config dir from --claude-config-dir / --tool-dir / registry)")
+        if not r["config_dirs"]:
+            r.pop("config_dirs")
+        insts = [(t, t, None) for t in sel] + [(f"{t}@{d}", t, d) for t, d in extras]
         user = os.path.join(self.d, "USER.md")
         base = find_base(HOSTS.rules_candidates(), os.path.expanduser("~"),
                          (getattr(self, "base_arg", None), os.environ.get("FRUGAL_BASE"), r.get("base")))
@@ -934,70 +1009,73 @@ class GlobalSetup(Setup):
                 write(user, open(os.path.join(KIT, "templates", "USER.md")).read()); self.log.append(f"created {user}")
             body = rules + GLOBAL_NOTE.format(user=user)
         r.pop("needs_user", None)
-        files, via = self.plan_rules(sel)
+        files, via = self.plan_rules(insts)
         old_tiers = dict(r.get("tiers") or {})
         tiers_out = r["tiers"] = {}
         hook = os.path.join(self.d, HOOK_FILE)
-        need_hook = any(HOSTS.H[t].get("hooks") not in (None, "hermes-plugin") for t in sel)
-        if need_hook or "claude-code" in sel:
+        need_hook = any(HOSTS.H[t].get("hooks") not in (None, "hermes-plugin") for _, t, _ in insts)
+        has_cc = any(t == "claude-code" for _, t, _ in insts)
+        if need_hook or has_cc:
             new = open(os.path.join(ROOT, "adapter", "hooks", "frugal_hook.py")).read()
             if read(hook) != new:
                 write(hook, new); os.chmod(hook, 0o755)
         # 1. helper tiers first (the rules paragraph names the values written)
         tier_txt, pending = {}, {}
-        for t in sel:
-            if t in kept_only:
-                prev_rows = (old_tiers.get(t) or {}).get("rows") or []
-                if old_tiers.get(t):
-                    tiers_out[t] = old_tiers[t]
-                tier_txt[t] = HOSTS.tier_rules(t, table, prev_rows)
-                continue
-            fs, changes, rows, note = HOSTS.tier_files(t, table)
-            for f, text in fs.items():
-                self.own_file(t, f, text)
-            for c in changes:
-                if c[0] == "toml":
-                    pending.setdefault((t, "toml", HOSTS.expand(t, "@root/config.toml")), [None, []])[1].append(c)
-                else:
-                    cfgp = {"gemini": "@root/settings.json", "copilot": "@root/settings.json",
-                            "qwen": "@root/settings.json"}[t]
-                    fmt = "json" if t == "copilot" else "jsonc"
-                    pending.setdefault((t, fmt, HOSTS.expand(t, cfgp)), [None, []])[1].append(c)
-            tiers_out[t] = {"rows": rows, "note": note}
-            if note:
-                self.log.append(f"{t} tiers: {note}")
-            tier_txt[t] = HOSTS.tier_rules(t, table, rows)
+        for ik, t, home in insts:
+            with HOSTS.home_override(t, home):
+                if ik in kept_only:
+                    prev_rows = (old_tiers.get(ik) or {}).get("rows") or []
+                    if old_tiers.get(ik):
+                        tiers_out[ik] = old_tiers[ik]
+                    tier_txt[ik] = HOSTS.tier_rules(t, table, prev_rows)
+                    continue
+                fs, changes, rows, note = HOSTS.tier_files(t, table)
+                for f, text in fs.items():
+                    self.own_file(t, f, text)
+                for c in changes:
+                    if c[0] == "toml":
+                        pending.setdefault((t, "toml", HOSTS.expand(t, "@root/config.toml")), [None, []])[1].append(c)
+                    else:
+                        cfgp = {"gemini": "@root/settings.json", "copilot": "@root/settings.json",
+                                "qwen": "@root/settings.json"}[t]
+                        fmt = "json" if t == "copilot" else "jsonc"
+                        pending.setdefault((t, fmt, HOSTS.expand(t, cfgp)), [None, []])[1].append(c)
+                tiers_out[ik] = {"rows": rows, "note": note}
+                if note:
+                    self.log.append(f"{ik} tiers: {note}")
+                tier_txt[ik] = HOSTS.tier_rules(t, table, rows)
         # 2. hooks / plugins
         native = [t for t in (r.get("native_hooks") or []) if t in kept_only]
-        for t in sel:
-            if t in kept_only:
+        for ik, t, home in insts:
+            if ik in kept_only:
                 continue
-            spec = HOSTS.hook_spec(t, hook, "claude-code" in sel)
-            if spec is None:
-                pj = HOSTS.plugin_js(t, ROOT, hook, self.d)
-                if pj:
-                    self.own_file(t, pj[0], pj[1]) and native.append(t)
-                continue
-            if spec[0] == "via":
-                self.log.append(f"{t}: hooks come from {spec[1]} (it runs ~/.claude/settings.json hooks)")
-                continue
-            if spec[0] == "file":
-                if t == "cline" and any(os.path.splitext(x)[0].lower() == "taskstart" and os.path.join(
-                        os.path.dirname(spec[1]), x) != spec[1] for x in (os.listdir(os.path.dirname(spec[1]))
-                                                                         if os.path.isdir(os.path.dirname(spec[1])) else [])):
-                    self.log.append(f"{t}: a TaskStart hook of yours exists (one file per event): not added")
+            with HOSTS.home_override(t, home):
+                spec = HOSTS.hook_spec(t, hook, has_cc)
+                if spec is None:
+                    pj = HOSTS.plugin_js(t, ROOT, hook, self.d)
+                    if pj:
+                        self.own_file(t, pj[0], pj[1]) and native.append(t)
                     continue
-                if self.own_file(t, spec[1], spec[2], 0o755 if t == "cline" else None):
-                    native.append(t)
-                continue
-            fmt, path, hk, sets = spec
-            key = (t, fmt, path)
-            pending.setdefault(key, [None, []])
-            pending[key][0] = hk if fmt != "lines" else None
-            pending[key][1] += [("set",) + tuple(x) for x in sets] if fmt != "lines" else []
-            if fmt == "lines":
-                pending[key].append(hk)
-            native.append(t)
+                if spec[0] == "via":
+                    self.log.append(f"{ik}: hooks come from {spec[1]} (it runs ~/.claude/settings.json hooks)")
+                    continue
+                if spec[0] == "file":
+                    if t == "cline" and any(os.path.splitext(x)[0].lower() == "taskstart" and os.path.join(
+                            os.path.dirname(spec[1]), x) != spec[1] for x in (os.listdir(os.path.dirname(spec[1]))
+                                                                             if os.path.isdir(os.path.dirname(spec[1])) else [])):
+                        self.log.append(f"{t}: a TaskStart hook of yours exists (one file per event): not added")
+                        continue
+                    if self.own_file(t, spec[1], spec[2], 0o755 if t == "cline" else None):
+                        native.append(t)
+                    continue
+                fmt, path, hk, sets = spec
+                key = (t, fmt, path)
+                pending.setdefault(key, [None, []])
+                pending[key][0] = hk if fmt != "lines" else None
+                pending[key][1] += [("set",) + tuple(x) for x in sets] if fmt != "lines" else []
+                if fmt == "lines":
+                    pending[key].append(hk)
+                native.append(t)
         for (t, fmt, path), v in pending.items():
             if fmt == "lines":
                 self.cfg_edit(t, "lines", path, lines=v[2])
@@ -1008,65 +1086,72 @@ class GlobalSetup(Setup):
         r["native_hooks"] = sorted(set(native))
         # 3. rules blocks
         done_files = {}
-        for t in sel:
-            h = HOSTS.H[t]
-            prev = tools.get(t, {})
-            full = body + "\n" + tier_txt.get(t, "") + "\n"
-            if t in via:
-                tools[t] = {"via": via[t][0], "file": via[t][1]}
-                continue
-            if h.get("rules") is None or h.get("rules") == "aider-read":
-                rp = os.path.join(self.d, "RULES.md")
-                write(rp, self.core(full) + "\n")
-                if h.get("rules") == "aider-read":
-                    self.cfg_edit(t, "yaml-list", os.path.expanduser("~/.aider.conf.yml"), lines=[("read", rp)])
-                tools[t] = {"rules_copy": rp}
-                continue
-            f = files[t]
-            if f in done_files:
-                tools[t] = {"same_as": done_files[f], "file": f}
-                continue
-            if h.get("policy") == "existing" and not os.path.exists(f):
-                tools.pop(t, None)
-                # Creating it would replace the tool's default identity / seed: only add to an existing one.
-                r.setdefault("needs_user", {})[t] = f
-                self.pending_block = self.core(full)
-                if t == "hermes":
+        for ik, t, home in insts:
+            with HOSTS.home_override(t, home):
+                self._wire_rules(r, tools, ik, t, home, body, tier_txt, files, via, done_files)
+        for ik, t, home in insts:
+            if (ik in tools or ik in (r.get("copied") or {})) and ik not in kept_only:
+                with HOSTS.home_override(t, home):
                     self.copy_skills_for(t, r)
-                    dst = self.copy_plugins(HOSTS.root(t), remember=True)
-                    r.setdefault("copied", {})[t] = {"home": HOSTS.root(t), "plugin": dst}
-                    self.note_backend(r, HOSTS.root(t))
-                continue
-            self._modes = {f: prev.get("mode")} if prev.get("mode") and prev.get("file") == f else {}
-            cur = read(f) or ""
-            m_ = START_RE.search(cur)
-            if m_ and "<!-- base-folder:start" in cur[m_.end():]:      # a base came later, below us: move after it
-                stripped, _ = self.strip_block(cur, self._modes.get(f))
-                self.change(f, stripped)
-                self._modes = {}
-                prev = {**prev, "mode": None}
-            existed = os.path.exists(f)
-            self.remember(f)
-            mode = self.put_block(f, full, after_base=True)
-            bsh = list(prev.get("block_sha") or [])
-            hh = self.block_sha_of(f)
-            if hh and hh not in bsh:
-                bsh.append(hh)
-            tools[t] = {"file": f, "mode": mode, "created": prev.get("created", not existed) if prev.get("file") == f
-                        else not existed, "block_sha": bsh}
-            if prev.get("file") and prev["file"] != f:
-                self.log.append(f"{t}: the rules moved to {f}; the old block in {prev['file']} is left (uninstall it first to move cleanly)")
-            done_files[f] = t
-            if t == "hermes":
-                tools[t]["plugin"] = self.copy_plugins(HOSTS.root(t), remember=True)
-                self.note_backend(r, HOSTS.root(t))
-        for t in sel:
-            if (t in tools or t in (r.get("copied") or {})) and t not in kept_only:
-                self.copy_skills_for(t, r)
         r["version"] = VERSION
         r["written"] = {**(r.get("written") or {}), **(getattr(self, "written", None) or {})}
         write(self.reg_path(), json.dumps(r, indent=2) + "\n")
         return self.check(), self.log
+
+    def _wire_rules(self, r, tools, ik, t, home, body, tier_txt, files, via, done_files):
+        """Step 3 of install for one instance (the caller set its home): its rules block, or the file it shares."""
+        tools_ = tools
+        h = HOSTS.H[t]
+        prev = tools_.get(ik, {})
+        full = body + "\n" + tier_txt.get(ik, "") + "\n"
+        if ik in via:
+            tools_[ik] = self._tag({"via": via[ik][0], "file": via[ik][1]}, t, home)
+            return
+        if h.get("rules") is None or h.get("rules") == "aider-read":
+            rp = os.path.join(self.d, "RULES.md")
+            write(rp, self.core(full) + "\n")
+            if h.get("rules") == "aider-read":
+                self.cfg_edit(t, "yaml-list", os.path.expanduser("~/.aider.conf.yml"), lines=[("read", rp)])
+            tools_[ik] = self._tag({"rules_copy": rp}, t, home)
+            return
+        f = files[ik]
+        if f in done_files:
+            tools_[ik] = self._tag({"same_as": done_files[f], "file": f}, t, home)
+            return
+        if h.get("policy") == "existing" and not os.path.exists(f):
+            tools_.pop(ik, None)
+            # Creating it would replace the tool's default identity / seed: only add to an existing one.
+            r.setdefault("needs_user", {})[ik] = f
+            self.pending_block = self.core(full)
+            if t == "hermes":
+                self.copy_skills_for(t, r)
+                dst = self.copy_plugins(HOSTS.root(t), remember=True)
+                r.setdefault("copied", {})[ik] = self._tag({"home": HOSTS.root(t), "plugin": dst}, t, home)
+                self.note_backend(r, HOSTS.root(t))
+            return
+        self._modes = {f: prev.get("mode")} if prev.get("mode") and prev.get("file") == f else {}
+        cur = read(f) or ""
+        m_ = START_RE.search(cur)
+        if m_ and "<!-- base-folder:start" in cur[m_.end():]:      # a base came later, below us: move after it
+            stripped, _ = self.strip_block(cur, self._modes.get(f))
+            self.change(f, stripped)
+            self._modes = {}
+            prev = {**prev, "mode": None}
+        existed = os.path.exists(f)
+        self.remember(f)
+        mode = self.put_block(f, full, after_base=True)
+        bsh = list(prev.get("block_sha") or [])
+        hh = self.block_sha_of(f)
+        if hh and hh not in bsh:
+            bsh.append(hh)
+        tools_[ik] = self._tag({"file": f, "mode": mode, "created": prev.get("created", not existed) if prev.get("file") == f
+                                else not existed, "block_sha": bsh}, t, home)
+        if prev.get("file") and prev["file"] != f:
+            self.log.append(f"{ik}: the rules moved to {f}; the old block in {prev['file']} is left (uninstall it first to move cleanly)")
+        done_files[f] = ik
+        if t == "hermes":
+            tools_[ik]["plugin"] = self.copy_plugins(HOSTS.root(t), remember=True)
+            self.note_backend(r, HOSTS.root(t))
 
     def copy_skills_for(self, t, r):
         """Skills once per folder: the shared ~/.agents/skills for every tool that reads it, else the tool's own."""
@@ -1137,7 +1222,7 @@ class GlobalSetup(Setup):
                 self.drop_hooks(data)
                 self.drop_or_restore(legacy_claude, json.dumps(data, indent=2, ensure_ascii=False) + "\n", data == {})
         for t, info in (r.get("tools") or {}).items():
-            f = info.get("file")
+            f, tool = info.get("file"), info.get("tool", t)
             if f and not info.get("via") and not info.get("same_as"):
                 txt = read(f)
                 if txt is not None:
@@ -1147,18 +1232,20 @@ class GlobalSetup(Setup):
                     new, had = self.strip_block(txt, info.get("mode"))
                     if had:
                         self.drop_or_restore(f, new, not new.strip())
-            if t == "hermes":
-                home = HOSTS.root(t) if not info.get("plugin") else os.path.dirname(os.path.dirname(info["plugin"]))
-                kept += self.remove_plugins(info.get("plugin") or os.path.join(home, "plugins", "frugal-bridge"), written)
-                self.log.append("plugin files removed; if you enabled it, also run its disable command")
-                self.restore_backend(home, (r.get("hermes_backend_prev") or {}).get(home))
+            if tool == "hermes":
+                with HOSTS.home_override(tool, info.get("home")):
+                    home = HOSTS.root(tool) if not info.get("plugin") else os.path.dirname(os.path.dirname(info["plugin"]))
+                    kept += self.remove_plugins(info.get("plugin") or os.path.join(home, "plugins", "frugal-bridge"), written)
+                    self.log.append("plugin files removed; if you enabled it, also run its disable command")
+                    self.restore_backend(home, (r.get("hermes_backend_prev") or {}).get(home))
         dirs = list(r.get("skills_dirs") or [])
-        for t in list(r.get("tools") or {}) + list(r.get("copied") or {}):   # where older versions put them
-            if t == "hermes":
-                h = (r.get("copied") or {}).get(t, {}).get("home") or HOSTS.root(t)
+        for t, info in list((r.get("tools") or {}).items()) + list((r.get("copied") or {}).items()):   # older versions' copies
+            tool = info.get("tool", t)
+            if tool == "hermes":
+                h = info.get("home") or HOSTS.root(tool)
                 dirs.append(os.path.join(h, "skills", "frugal-bridge"))
-            elif t in ("claude-code", "codex"):
-                dirs.append(os.path.join(HOSTS.root(t), "skills"))
+            elif tool in ("claude-code", "codex"):
+                dirs.append(os.path.join(info.get("home") or HOSTS.root(tool), "skills"))
         for d in dict.fromkeys(dirs):
             for sk in os.listdir(os.path.join(KIT, "skills")):
                 kept += self.remove_copy(os.path.join(d, sk), os.path.join(KIT, "skills", sk), written)
@@ -1220,7 +1307,7 @@ class GlobalSetup(Setup):
                 out.append(f"{t}: same file as {info['same_as']} ({info['file']}) block={n}"); ok &= n == 1
                 continue
             out.append(f"{t}: {info['file']} block={n} size={b}"); ok &= n == 1
-            cap = (HOSTS.H.get(t) or {}).get("cap")
+            cap = (HOSTS.H.get(info.get("tool", t)) or {}).get("cap")
             if cap:
                 size = b if cap[0] == "bytes" else len(txt)
                 if size > cap[1]:
@@ -1231,7 +1318,7 @@ class GlobalSetup(Setup):
                     txt.find("<!-- base-folder:start") > START_RE.search(txt).start():
                 out.append(f"  order: frugal block before the base block (should be after)"); ok = False
         for t, info in list(tools.items()) + list((r.get("copied") or {}).items()):
-            if t == "hermes" and info.get("plugin"):
+            if info.get("tool", t) == "hermes" and info.get("plugin"):
                 out.append(self.tiers_status(os.path.dirname(os.path.dirname(info["plugin"]))))
         hooks = r.get("native_hooks") or []
         if hooks:
@@ -1321,7 +1408,7 @@ def matrix_lines(g):
     r = g.reg()
     out = []
     for t, info in (r.get("tools") or {}).items():
-        h = HOSTS.H.get(t, {})
+        h = HOSTS.H.get(info.get("tool", t), {})
         rules = (f"via {info['via']}" if info.get("via") else "hook (RULES.md)" if info.get("rules_copy") and t == "cursor"
                  else "read: list" if info.get("rules_copy") else info.get("file", "?"))
         hk = "yes" if t in (r.get("native_hooks") or []) else ("plugin" if t == "hermes" else
@@ -1334,8 +1421,31 @@ def matrix_lines(g):
     return out
 
 
+def global_dir_args(argv):
+    """--claude-config-dir DIR and --tool-dir TOOL=DIR (both repeatable) as [(tool, dir)]; None when a value is bad."""
+    out = []
+    for i, a in enumerate(argv):
+        if a not in ("--claude-config-dir", "--tool-dir"):
+            continue
+        val = argv[i + 1] if i + 1 < len(argv) else ""
+        if a == "--claude-config-dir":
+            t, d = "claude-code", val
+        else:
+            t, _, d = val.partition("=")
+        if not d or t not in EXTRA_TOOLS:
+            print(f"{a} {val or '(no value)'}: want {'DIR' if a == '--claude-config-dir' else 'TOOL=DIR'}, TOOL one of "
+                  f"{', '.join(EXTRA_TOOLS)}; nothing changed")
+            return None
+        out.append((t, os.path.abspath(os.path.expanduser(d))))
+    return out
+
+
 def main_global(argv):
     g = GlobalSetup()
+    extra = global_dir_args(argv)
+    if extra is None:
+        return 2
+    g.extra_dirs_arg = extra
     if "--base" in argv:
         g.base_arg = os.path.abspath(os.path.expanduser(argv[argv.index("--base") + 1]))
         if not is_base(g.base_arg):
@@ -1348,6 +1458,8 @@ def main_global(argv):
         rep, log = g.install(hosts)
         print("\n".join(log)); print(rep)
         r = g.reg()
+        for t, ds in (r.get("config_dirs") or {}).items():
+            print(f"  {t}: also wired: {', '.join(ds)} (same block, hooks and settings as the default dir)")
         tools = r.get("tools", {})
         print("Enforcement on this machine (every folder, every new session):")
         print("\n".join(matrix_lines(g)))

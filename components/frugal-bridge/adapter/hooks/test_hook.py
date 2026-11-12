@@ -44,3 +44,16 @@ def test_start_kits_slots(tmp_path):
 
 def test_silent_without_files(tmp_path):
     assert run({"hook_event_name": "SessionStart", "cwd": str(tmp_path)}, tmp_path) is None
+
+
+def test_state_follows_claude_config_dir(tmp_path):
+    cfg, home = tmp_path / "worker-claude", tmp_path / "home"
+    home.mkdir()
+    t = tmp_path / "t.jsonl"; transcript(t, "claude-opus-5-5", 160000)
+    ev = {"hook_event_name": "UserPromptSubmit", "session_id": "cfg", "transcript_path": str(t)}
+    env = dict(os.environ, HOME=str(home), CLAUDE_CONFIG_DIR=str(cfg))
+    r = subprocess.run([sys.executable, HOOK], input=json.dumps(ev), capture_output=True, text=True, env=env, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert "160k" in json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert (cfg / "frugal-bridge" / "state.json").is_file()        # the warn flag lives in the Claude dir in use
+    assert not (home / ".claude").exists()                         # and ~/.claude is never created

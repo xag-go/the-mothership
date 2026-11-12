@@ -25,7 +25,6 @@ WARN, HARD, WARN_CHEAP = 150000, 300000, 100000
 OUT_LIMIT = 12000
 CHEAP = ("haiku", "flash", "mini", "luna", "nano")
 ERR = re.compile(r"(error|exception|traceback|failed|fail\b|fatal|panic|denied|not found|warning)", re.I)
-STATE = os.path.expanduser("~/.claude/frugal-bridge/state.json")   # warn flags (older installs keep their file)
 
 
 # >>> frugal-bridge start-files (shared: identical copy in adapter/hooks, adapter/plugin, adapter/proxy; a test checks)
@@ -256,16 +255,24 @@ def start_hint(project_dir=None, tag="[frugal-bridge]", host=None, identity_file
 
 
 # ---------------------------------------------------------------- state, once-guard, host
+def state_file():
+    """Warn flags, resolved on every call: $CLAUDE_CONFIG_DIR/frugal-bridge/state.json when set (a second Claude dir
+    keeps its own flags), else ~/.claude/frugal-bridge/state.json (older installs keep their file)."""
+    d = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    return os.path.join(os.path.expanduser(d), "frugal-bridge", "state.json")
+
+
 def load_state():
     try:
-        return json.load(open(STATE))
+        return json.load(open(state_file()))
     except Exception:
         return {}
 
 
 def save_state(s):
-    os.makedirs(os.path.dirname(STATE), exist_ok=True)
-    json.dump(s, open(STATE, "w"))
+    path = state_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    json.dump(s, open(path, "w"))
 
 
 def _hstate_path():

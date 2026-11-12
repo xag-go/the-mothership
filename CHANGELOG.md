@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.2.0 (2026-11-12)
+
+- Skeleton Base 1.6.0 (`9d5991e`) vendored (was 1.5.4 `84f6e79`): every tool's folder follows its own setting
+  (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HERMES_HOME`, ...), several folders of one tool (`connect --tool-dir`, shared
+  registry `~/.config/ai-tool-dirs.d/`), `engines/` and `projects/` in the base with per-tool share rules for git and
+  Syncthing, `engine adopt|release|mirror`, `projects move|clone`, `doctor`, pre-commit guard.
+- Frugal-Bridge `3fee219` vendored (was `ed757f2`): hook state under `CLAUDE_CONFIG_DIR`, `install --global
+  --tool-dir` / `--claude-config-dir`, the shared registry, a moved `FRUGAL_HOME` rewrites its hook paths.
+- `install.py --tool-dir TOOL=DIR` / `--claude-config-dir DIR` (repeatable, kept for re-runs and updates): passed to
+  both products. The uninstall snapshot also covers `OPENCLAW_STATE_DIR`, `COPILOT_HOME` and the extra dirs.
+- Tests: a Claude Code config dir inside the base (never `~/.claude`, secrets ignored by git, byte-identical
+  uninstall), a second Claude dir by option kept for re-runs, a bad `--tool-dir`; real matrix row
+  `claude-relocated-config` (a-g PASS on `claude-haiku-5-5`).
+
 ## v1.1.5 (2026-11-11)
 
 - Skeleton Base 1.5.4 (`84f6e79`) vendored (was 1.5.3 `21f5b59`): `tidy` waits for the watcher's writes (a page run

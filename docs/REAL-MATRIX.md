@@ -33,6 +33,23 @@ unrelated folder, `brain.py collect`, `install.py uninstall`, then a file-by-fil
 | opencode 1.19 | Google (gemini-3.7-flash) | NOT RUN | NOT RUN | n/a (no store) | config PASS, answer NOT RUN | PASS | not tested |
 | Codex | OpenAI | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN | NOT RUN |
 
+### Relocated config dir (2026-11-12, The Mothership 1.2.0: Skeleton Base 1.6.0 `9d5991e`, Frugal-Bridge `3fee219`)
+
+Row `claude-relocated-config`: Claude Code 2.1.287 with `CLAUDE_CONFIG_DIR=BASE/engines/claude` (the credentials
+file copied there, `~/.claude` absent), main model `claude-haiku-5-5` (cost). f = `~/.claude` and `~/.claude.json`
+never made; g = git ignores `engines/claude/.credentials.json`, `.claude.json`, `projects/*.jsonl` and keeps
+`engines/claude/CLAUDE.md`.
+
+| tool | provider (main model) | a | b | c | d | e | f | g |
+|---|---|---|---|---|---|---|---|---|
+| Claude Code, config dir in the base | Anthropic (claude-haiku-5-5) | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
+
+Evidence: answer "Robin Example / Current focus: the Lighthouse garden project / Cheap tier (frugal-cheap, medium
+effort)"; the tea fact saved in the base and collected from `engines/claude/projects/*/memory/`; the rules file
+`engines/claude/CLAUDE.md` has the base block, then Frugal-Bridge's; after uninstall the only HOME changes are
+Claude's own `~/.cache/claude-cli-nodejs` files. `codex-relocated-home` NOT RUN (Codex usage limit until
+2026-11-13).
+
 Why NOT RUN:
 - Gemini CLI b/c and opencode a/b/d-answer: the Google key is on the free tier (20 requests per model per day).
   `gemini-3.8-flash` (the cheap tier's model, also what Gemini CLI 0.68 calls internally before every prompt

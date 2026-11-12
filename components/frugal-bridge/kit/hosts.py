@@ -12,6 +12,7 @@ Rules:
 - "existing" = only added to an existing file (Hermes SOUL.md is the tool's identity: never created).
 Standard library only.
 """
+import contextlib
 import json
 import os
 import re
@@ -43,12 +44,12 @@ H = {
         notes="Hooks run only after the user trusts them in /hooks (by hash; re-trust after a change). Output filter = "
               "PostToolUse block+reason (the reason replaces the result; partial)."),
     "gemini": dict(
-        label="Gemini CLI", root=("", "~/.gemini"), bins=["gemini"], proof=[], rules="@root/GEMINI.md",
+        label="Gemini CLI", root=("GEMINI_CLI_HOME", "~/.gemini"), env_sub=".gemini", bins=["gemini"], proof=[], rules="@root/GEMINI.md",
         skills="shared", hooks="gemini", filter=True, usage="none in hooks (AfterModel fires per chunk); proxy",
         tiers="gemini-agents", family="google", proxy="GOOGLE_GEMINI_BASE_URL (env)",
         notes="~/.gemini is also made by Antigravity IDE: not proof. Subagents need experimental.enableAgents."),
     "antigravity": dict(
-        label="Antigravity IDE", root=("", "~/.gemini"), bins=["antigravity"], proof=["~/.gemini/antigravity-ide"],
+        label="Antigravity IDE", root=("GEMINI_CLI_HOME", "~/.gemini"), env_sub=".gemini", bins=["antigravity"], proof=["~/.gemini/antigravity-ide"],
         rules="@root/GEMINI.md", skills=None, hooks=None, tiers=None, proxy="",
         notes="Reads ~/.gemini/GEMINI.md (shared with Gemini CLI: one block). No hooks or per-helper models."),
     "qwen": dict(
@@ -57,7 +58,7 @@ H = {
         tiers="qwen-grades", family="qwen-config", proxy="modelProviders[].baseUrl",
         notes="PostToolUse can only append context (no replace). No per-subagent effort (upstream: follow-up PRs)."),
     "opencode": dict(
-        label="opencode", root=("", "~/.config/opencode"), bins=["opencode"],
+        label="opencode", root=("XDG_CONFIG_HOME", "~/.config/opencode"), env_sub="opencode", bins=["opencode"],
         proof=["@root/opencode.json", "@root/opencode.jsonc"], rules="@root/AGENTS.md", skills="shared",
         hooks="opencode-plugin", filter=True, usage="plugin: message.updated tokens (V1 API)",
         tiers="opencode-agents", family="opencode-config", proxy="provider.<id>.options.baseURL",
@@ -183,9 +184,34 @@ NOT_INSTALLABLE = {
 
 
 # ---------------------------------------------------------------- paths
+# one tool's home for the duration of a `with home_override(t, dir):` block (install --global --tool-dir / --claude-
+# config-dir wires a second dir of the same tool with the same block, hooks and settings as the default one)
+_HOME_OVERRIDE = {}
+
+
+@contextlib.contextmanager
+def home_override(t, d):
+    if not d:
+        yield
+        return
+    old = _HOME_OVERRIDE.get(t)
+    _HOME_OVERRIDE[t] = os.path.abspath(os.path.expanduser(d))
+    try:
+        yield
+    finally:
+        if old is None:
+            _HOME_OVERRIDE.pop(t, None)
+        else:
+            _HOME_OVERRIDE[t] = old
+
+
 def root(t):
+    if t in _HOME_OVERRIDE:
+        return _HOME_OVERRIDE[t]
     env, default = H[t]["root"]
     r = os.environ.get(env) if env else None
+    if r and H[t].get("env_sub"):      # GEMINI_CLI_HOME is the parent of .gemini/, XDG_CONFIG_HOME of opencode/
+        r = os.path.join(r, H[t]["env_sub"])
     return os.path.abspath(os.path.expanduser(r or default))
 
 

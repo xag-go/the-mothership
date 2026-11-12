@@ -44,3 +44,20 @@ candidates, then test on your own tasks (AGENTS.md section 8).
   DECISIONS files and its adapters read the base's `slots` (e.g. now = `hot.md`, user = `wiki/me/README.md`).
 - Size: `setup.py check` measures the whole `AGENTS.md` (all blocks): some tools read only the first 32 KiB.
 - Pointer files: `@AGENTS.md` (some tools also accept a setting that names `AGENTS.md` as their context file).
+
+## Relocated or several config dirs
+
+- **Another Claude dir** (a worker or second account): `python3 kit/setup.py install --global --claude-config-dir DIR`.
+  Any tool can take a second dir the same way: `--tool-dir TOOL=DIR` (TOOL = claude-code, codex, gemini, opencode or
+  hermes; repeatable). Each extra dir gets the same rules block, hooks, settings and helper tiers as the default one.
+- **Shared registry**: other installers may list dirs in `~/.config/ai-tool-dirs.d/*.json` or
+  `~/.config/claude-code-dirs.d/*.json` (one object or a list of `{"tool", "dir", "owner", "purpose"}`; the second
+  folder means tool = claude-code). Bad or missing files are skipped with a note.
+- The dirs are remembered in `$FRUGAL_HOME/global.json` (`config_dirs`), so a re-run, `check --global` and
+  `uninstall --global` cover each one, and uninstall gives each dir back byte-identical.
+- **Env homes**: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HERMES_HOME`, `GEMINI_CLI_HOME` (the parent of `.gemini/`) and
+  `XDG_CONFIG_HOME` (opencode) are followed.
+- **FRUGAL_HOME anywhere** (for example inside a knowledge base: `<base>/engines/frugal-bridge`). Hook commands point at
+  `$FRUGAL_HOME`. After moving the folder, set the new `FRUGAL_HOME` and re-run `install --global`: the old hook entries
+  are replaced, not duplicated.
+- The hook's warn flags live in `$CLAUDE_CONFIG_DIR/frugal-bridge/state.json` when that is set (else `~/.claude/...`).

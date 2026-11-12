@@ -697,3 +697,103 @@ def test_rules_tell_agents_to_pass_the_tier_model():
     sk = open(os.path.join(HERE, "skills", "frugal-delegate", "SKILL.md")).read()
     for t in (a, sk):
         assert "haiku" in t and "sonnet" in t and "opus" in t and "tier" in t
+
+
+# ---------------------------------------------------------------- relocated / several config dirs
+def test_global_claude_config_dir_flag_wires_second_dir(tmp_path, monkeypatch):
+    home = _fake_home(tmp_path, monkeypatch)
+    (home / ".claude").mkdir()
+    (home / ".claude" / "CLAUDE.md").write_text("# main\n")
+    before_main = (home / ".claude" / "CLAUDE.md").read_bytes()
+    worker = tmp_path / "worker-claude"
+    assert S.main(["setup.py", "install", "--global", "--claude-config-dir", str(worker)]) == 0
+    for d in (home / ".claude", worker):
+        assert (d / "CLAUDE.md").read_text().count("frugal-bridge:start") == 1
+        assert any("frugal_hook.py" in c for cmds in _hooks_by_event(d / "settings.json").values() for c in cmds)
+    gl = json.loads((home / ".frugal-bridge" / "global.json").read_text())
+    assert gl["config_dirs"] == {"claude-code": [str(worker)]}
+    assert S.main(["setup.py", "install", "--global"]) == 0                 # re-run: the recorded dir stays wired
+    assert (worker / "CLAUDE.md").read_text().count("frugal-bridge:start") == 1
+    assert S.main(["setup.py", "check", "--global"]) == 0
+    assert S.main(["setup.py", "uninstall", "--global"]) == 0
+    assert (home / ".claude" / "CLAUDE.md").read_bytes() == before_main
+    assert not (worker / "CLAUDE.md").exists() and not (worker / "settings.json").exists()
+
+
+def test_global_tool_dir_second_codex_dir(tmp_path, monkeypatch):
+    home = _fake_home(tmp_path, monkeypatch)
+    (home / ".codex").mkdir()
+    alt = tmp_path / "codex-work"
+    assert S.main(["setup.py", "install", "--global", "--tool-dir", f"codex={alt}"]) == 0
+    assert (home / ".codex" / "AGENTS.md").read_text().count("frugal-bridge:start") == 1
+    assert (alt / "AGENTS.md").read_text().count("frugal-bridge:start") == 1
+    assert json.loads((home / ".frugal-bridge" / "global.json").read_text())["config_dirs"] == {"codex": [str(alt)]}
+    assert S.main(["setup.py", "uninstall", "--global"]) == 0
+    assert not (alt / "AGENTS.md").exists() and not (home / ".codex" / "AGENTS.md").exists()
+
+
+def test_global_tool_dir_bad_tool_refused(tmp_path, monkeypatch, capsys):
+    home = _fake_home(tmp_path, monkeypatch)
+    assert S.main(["setup.py", "install", "--global", "--tool-dir", "cursor=/tmp/x"]) == 2
+    assert S.main(["setup.py", "install", "--global", "--tool-dir", "codex"]) == 2
+    assert "nothing changed" in capsys.readouterr().out
+    assert not (home / ".frugal-bridge" / "global.json").exists()
+
+
+def test_global_registry_files_wire_dirs_and_bad_files_skipped(tmp_path, monkeypatch, capsys):
+    home = _fake_home(tmp_path, monkeypatch)
+    (home / ".claude").mkdir()
+    worker, codex_alt = tmp_path / "w1", tmp_path / "c2"
+    reg1 = home / ".config" / "claude-code-dirs.d"; reg1.mkdir(parents=True)
+    (reg1 / "worker.json").write_text(json.dumps({"dir": str(worker), "owner": "someone", "purpose": "worker"}))
+    (reg1 / "broken.json").write_text("{not json")
+    reg2 = home / ".config" / "ai-tool-dirs.d"; reg2.mkdir(parents=True)
+    (reg2 / "list.json").write_text(json.dumps([{"tool": "codex", "dir": str(codex_alt)}, {"tool": "cursor", "dir": "/x"},
+                                                "junk", {"tool": "codex"}]))
+    (reg2 / "notes.txt").write_text("ignored: not json, not read")
+    assert S.main(["setup.py", "install", "--global"]) == 0
+    out = capsys.readouterr().out
+    assert "broken.json" in out and "not an object" in out and "cursor" in out and 'needs "tool" and "dir"' in out
+    assert (worker / "CLAUDE.md").read_text().count("frugal-bridge:start") == 1
+    assert (codex_alt / "AGENTS.md").read_text().count("frugal-bridge:start") == 1
+    assert S.main(["setup.py", "uninstall", "--global"]) == 0
+    assert not (worker / "CLAUDE.md").exists() and not (codex_alt / "AGENTS.md").exists()
+
+
+def test_global_env_homes_gemini_and_opencode(tmp_path, monkeypatch):
+    _fake_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("GEMINI_CLI_HOME", str(tmp_path / "gh"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    assert S.HOSTS.root("gemini") == str(tmp_path / "gh" / ".gemini")
+    assert S.HOSTS.root("antigravity") == str(tmp_path / "gh" / ".gemini")
+    assert S.HOSTS.root("opencode") == str(tmp_path / "xdg" / "opencode")
+    tg = S.global_targets()
+    assert tg["gemini"][0] == str(tmp_path / "gh" / ".gemini") and tg["gemini"][1] == "GEMINI.md"
+    assert tg["opencode"][0] == str(tmp_path / "xdg" / "opencode") and tg["opencode"][1] == "AGENTS.md"
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    assert S.HOSTS.root("opencode") == str(tmp_path / "home" / ".config" / "opencode")
+
+
+def test_global_frugal_home_moved_inside_base_rewrites_hooks(tmp_path, monkeypatch):
+    home = _fake_home(tmp_path, monkeypatch)
+    kb = _bare_base(tmp_path / "kb")
+    fh_a = kb / "engines" / "frugal-bridge"                    # FRUGAL_HOME inside a knowledge base folder
+    monkeypatch.setenv("FRUGAL_HOME", str(fh_a))
+    (home / ".claude").mkdir()
+    st = home / ".claude" / "settings.json"
+    st.write_text('{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo mine"}]}]}}')
+    before = json.loads(st.read_text())
+    assert S.main(["setup.py", "install", "--global", "--base", str(kb)]) == 0
+    assert str(fh_a / "frugal_hook.py") in st.read_text()
+    fh_b = tmp_path / "moved" / "engines" / "frugal-bridge"    # the folder moves (with its global.json) elsewhere
+    fh_b.parent.mkdir(parents=True)
+    shutil.move(str(fh_a), str(fh_b))
+    monkeypatch.setenv("FRUGAL_HOME", str(fh_b))
+    assert S.main(["setup.py", "install", "--global"]) == 0       # re-run: base recorded, hooks point at the new home
+    h = _hooks_by_event(st)
+    assert h["Stop"] == ["echo mine", f'python3 "{fh_b}/frugal_hook.py" --tool claude-code --event usage {S.HOOK_TAG}']
+    assert all(str(fh_a) not in c for cmds in h.values() for c in cmds)
+    assert all(sum(S.HOOK_TAG in c for c in cmds) == 1 for cmds in h.values())   # replaced, not duplicated
+    assert S.main(["setup.py", "check", "--global"]) == 0
+    assert S.main(["setup.py", "uninstall", "--global"]) == 0
+    assert json.loads(st.read_text()) == before

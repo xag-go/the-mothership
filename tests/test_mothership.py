@@ -23,7 +23,8 @@ FB_VENDOR = REPO / "components" / "frugal-bridge"
 frugal_quoted = "def parse_base_path" in (FB_VENDOR / "kit" / "setup.py").read_text()   # reads quoted Path: lines
 SCRUB = ("HERMES_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "FRUGAL_HOME", "FRUGAL_BRIDGE_KIT", "FRUGAL_BRIDGE_SRC",
          "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "MOTHERSHIP_HOME",
-         "MOTHERSHIP_PLATFORM", "MOTHERSHIP_TEST_FAIL", "MOTHERSHIP_TEST_KILL", "BRAIN_ROOT", "HERMES_AGENT")
+         "MOTHERSHIP_PLATFORM", "MOTHERSHIP_TEST_FAIL", "MOTHERSHIP_TEST_KILL", "BRAIN_ROOT", "HERMES_AGENT",
+         "OPENCLAW_HOME", "OPENCLAW_STATE_DIR", "COPILOT_HOME", "GEMINI_CLI_HOME", "MY_SETUP_SOURCES_DIR")
 USER_CLAUDE = "# my global rules\nUse tabs.\n"
 USER_SETTINGS = ('{\n  "hooks": {\n    "Stop": [\n      {"hooks": [{"type": "command", "command": "echo my-own-hook"}]}\n'
                  '    ]\n  },\n  "theme": "dark"\n}\n')
@@ -603,6 +604,72 @@ class InstallTests(Base):
         self.assertEqual(tree(self.home), t0)
 
 
+class RelocatedDirTests(Base):
+    """A tool's config dir moved by its own setting (inside the base, engines/<tool>/), and one more dir of a tool."""
+
+    def blocks_in_order(self, f):
+        self.assert_order(f)
+        self.assertIn(f"Path: {self.base}", f.read_text())
+
+    def test_claude_config_dir_inside_the_base_never_recreates_home_dir(self):
+        shutil.rmtree(self.home / ".claude")
+        eng = self.base / "engines" / "claude"
+        eng.mkdir(parents=True)
+        (eng / "CLAUDE.md").write_text(USER_CLAUDE)
+        (eng / "settings.json").write_text(USER_SETTINGS)
+        home0 = {k: v for k, v in tree(self.home).items() if not k.startswith("skeleton-base-home")}
+        out = self.ms("--yes", CLAUDE_CONFIG_DIR=str(eng))
+        self.assertIn("checks: all OK", out)
+        self.assertFalse((self.home / ".claude").exists())
+        self.assertFalse((self.home / ".claude.json").exists())
+        self.blocks_in_order(eng / "CLAUDE.md")
+        cs = json.loads((eng / "settings.json").read_text())
+        cmds = [h["command"] for e in cs["hooks"].get("SessionEnd", []) for h in e.get("hooks", [])]
+        self.assertTrue(any("brain.py collect" in c for c in cmds), cmds)
+        self.assertTrue(any("frugal" in c for evs in cs["hooks"].values() for e in evs for h in e.get("hooks", [])
+                            for c in [h.get("command", "")]), cs["hooks"])
+        self.assertEqual(cs["permissions"]["additionalDirectories"], [str(self.base)])
+        st = subprocess.run(["git", "-C", str(self.base), "init", "-q"], capture_output=True)
+        self.assertEqual(st.returncode, 0)
+        for secret in ("engines/claude/.credentials.json", "engines/claude/.claude.json",
+                       "engines/claude/projects/-k/s.jsonl"):
+            ig = subprocess.run(["git", "-C", str(self.base), "check-ignore", "-q", "--no-index", secret])
+            self.assertEqual(ig.returncode, 0, f"{secret} in engines/ must never reach git")
+        ig = subprocess.run(["git", "-C", str(self.base), "check-ignore", "-q", "--no-index", "engines/claude/CLAUDE.md"])
+        self.assertEqual(ig.returncode, 1, "a tool's rules in engines/ are kept in git")
+        shutil.rmtree(self.base / ".git")
+        self.ms("--yes", CLAUDE_CONFIG_DIR=str(eng))                   # a re-run changes nothing
+        self.ms("uninstall", CLAUDE_CONFIG_DIR=str(eng))
+        self.assertEqual({k: v for k, v in tree(self.home).items() if not k.startswith("skeleton-base-home")},
+                         home0)
+        self.assertEqual((eng / "CLAUDE.md").read_text(), USER_CLAUDE)
+        self.assertEqual((eng / "settings.json").read_text(), USER_SETTINGS)
+
+    def test_one_more_claude_dir_by_option_kept_for_reruns(self):
+        self.user_files()
+        worker = self.tmp / "worker" / "claude"
+        worker.mkdir(parents=True)
+        t0 = tree(self.home)
+        self.ms("--yes", "--claude-config-dir", worker)
+        for f in self.rules() + [worker / "CLAUDE.md"]:
+            self.blocks_in_order(f)
+        ws = json.loads((worker / "settings.json").read_text())
+        self.assertIn(str(self.base), ws["permissions"]["additionalDirectories"])
+        self.assertEqual(self.state()["options"]["tool_dirs"], [f"claude-code={worker}"])
+        self.ms("--yes")                                             # kept: still wired, still one block each
+        self.blocks_in_order(worker / "CLAUDE.md")
+        self.ms("uninstall")
+        self.assertEqual(tree(self.home), t0)
+        left = sorted(p.name for p in worker.rglob("*") if p.is_file())
+        self.assertNotIn("CLAUDE.md", [n for n in left if "base-folder" in (worker / n).read_text()])
+        for n in left:
+            self.assertNotIn("base-folder:start", (worker / n).read_text())
+
+    def test_bad_tool_dir_refused(self):
+        out = self.ms("--yes", "--tool-dir", "nodir", rc=2)
+        self.assertIn("TOOL=DIR", out)
+
+
 class SystemdTests(Base):
     def test_yes_enables_units_when_systemctl_works_and_uninstall_disables(self):
         self.fake_systemctl()
@@ -1055,8 +1122,11 @@ class KeepsYourDataTests(Base):
             same_kit = any(k.is_file() and hashlib.sha256(k.read_bytes()).hexdigest() == v[1] for k in kit)
             self.assertTrue(rel in PRODUCT_FILES or same_kit or rel.startswith((".frugal-bridge/", ".brain/backups/connect-")),
                             f"removed or changed and not a kit file: {rel}")
+        hook = ".git/hooks/pre-commit"                    # the base guard init wrote: a kit file, removed
+        self.assertIn(hook, before)
+        self.assertNotIn(hook, after)
         self.assertEqual({k: v for k, v in after.items() if k.startswith(".git/")},
-                         {k: v for k, v in before.items() if k.startswith(".git/")})
+                         {k: v for k, v in before.items() if k.startswith(".git/") and k != hook})
         self.assertEqual(self.git(b, "log", "--format=%H %s"), log0)
         self.assertEqual((b / "AGENTS.md").read_text().strip("\n"), USER_RULES.strip("\n"))
         self.assertIn(f"Your data is kept in {b}:", out)

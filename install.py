@@ -27,7 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.1.5"
+VERSION = "1.2.0"
 ROOT = Path(__file__).resolve().parent
 LOCK = "components.lock"
 STATE = ".mothership.json"
@@ -269,7 +269,10 @@ def dir_roots(base):
     h, e = home(), os.environ.get
     roots = [h / ".claude", h / ".codex", h / ".gemini", h / ".qwen", h / ".config", h / ".hermes", h / ".openclaw",
              h / ".codeium", h / ".kiro", h / ".local/share", frugal_home(), mothership_home()]
-    roots += [Path(v) for v in (e("CLAUDE_CONFIG_DIR"), e("CODEX_HOME"), e("HERMES_HOME")) if v]
+    roots += [Path(v) for v in (e("CLAUDE_CONFIG_DIR"), e("CODEX_HOME"), e("HERMES_HOME"), e("OPENCLAW_STATE_DIR"),
+                                e("COPILOT_HOME")) if v]
+    for v in ((load_json(Path(base) / STATE, {}) or {}).get("options") or {}).get("tool_dirs") or []:
+        roots.append(Path(v.partition("=")[2]))      # extra config dirs wired with --tool-dir
     return roots, [Path(base), frugal_home(), mothership_home()]
 
 
@@ -615,6 +618,16 @@ class Mothership:
             opts["timer"] = True
         if self.a.mcp:
             opts["mcp"] = True                       # kept for re-runs and updates, like the other choices
+        tdirs = list(opts.get("tool_dirs") or [])
+        for v in (self.a.tool_dir or []) + ["claude-code=" + d for d in (self.a.claude_config_dir or [])]:
+            name, eq, d = v.partition("=")
+            if not eq or not name or not d:
+                raise Fail(f"--tool-dir needs TOOL=DIR (got {v!r})")
+            v = f"{name}={os.path.abspath(os.path.expanduser(d))}"
+            if v not in tdirs:
+                tdirs.append(v)
+        if tdirs:
+            opts["tool_dirs"] = tdirs                # one more config dir of a tool: kept for re-runs too
         if not is_linux():
             opts["watch"] = opts["timer"] = False
         own = dict(st.get("own") or {})
@@ -640,7 +653,10 @@ class Mothership:
                            f"{home() / 'skeleton-base-home'}) and run again with --base, or use --no-frugal.")
         keep = self.newer_base(base)
         connect_flags = ["--watch"] if opts["watch"] else (["--timer"] if opts["timer"] else [])
-        self.connect_extra = ["--mcp"] if opts.get("mcp") else []
+        self.connect_extra = (["--mcp"] if opts.get("mcp") else []) + \
+            [a for v in opts.get("tool_dirs") or [] for a in ("--tool-dir", v)]
+        self.frugal_extra = [a for v in opts.get("tool_dirs") or [] for a in ("--tool-dir", v)] \
+            if "--tool-dir" in (read(self.fbk / "kit" / "setup.py") or "") else []
 
         plan = self.plan(base, opts, own, connect_flags, keep)
         if self.a.dry_run:
@@ -841,7 +857,8 @@ class Mothership:
                 self.say(f"- Frugal-Bridge for this user: already installed (its own kit {kit}); re-run by connect")
             else:
                 self.say("- Frugal-Bridge: install for this user and every tool found (--global --hosts auto)")
-                self.py(self.fbk / "kit" / "setup.py", "install", "--global", *self.frugal_hosts_arg())
+                self.py(self.fbk / "kit" / "setup.py", "install", "--global", *self.frugal_hosts_arg(),
+                        *getattr(self, "frugal_extra", []))
         self.track("frugal-global")
 
         self.set_kit_key(own)
@@ -1435,6 +1452,10 @@ def main(argv=None):
     p.add_argument("--watch", dest="watch", action="store_true", default=None, help="watcher service (default on Linux)")
     p.add_argument("--no-watch", dest="watch", action="store_false")
     p.add_argument("--timer", action="store_true", help="daily collect timer (also comes with --watch)")
+    p.add_argument("--tool-dir", action="append", metavar="TOOL=DIR",
+                   help="one more config dir of a tool (e.g. claude-code=~/worker-claude), wired like its default "
+                        "one by both products; repeatable, kept for re-runs")
+    p.add_argument("--claude-config-dir", action="append", metavar="DIR", help="same as --tool-dir claude-code=DIR")
     p.add_argument("--mcp", action="store_true", help="also register the base's MCP server (brain.py mcp) in each "
                    "tool's MCP config (Skeleton Base connect --mcp; kept for later runs)")
     p.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
