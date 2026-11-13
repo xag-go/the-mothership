@@ -11,7 +11,10 @@
 - Frugal-Bridge vendored at release 2.42 (`7e212b2`, was `1180c57`): the CORE rule that a tool's built-in product
   identity is not a role or a name, and `RELEASE = "2.42"` (the number compared; `VERSION` stays the rules-block marker).
 - A user's own kit path in global.json is no longer replaced by the payload path on a later update.
-- Skeleton Base 1.6.4 (`d424d7f`) unchanged.
+- Skeleton Base 1.6.5 (`ef3de8d`, was 1.6.4 `d424d7f`): with sync all on, Syncthing scans the base only on request,
+  after Skeleton Base's content scan (folder watcher off, periodic rescan 0, set and restored through Syncthing's REST
+  API; a drop-in scans before Syncthing starts); a failed scan puts a fail-closed lockdown block (`*`) at the top of the
+  base's `.stignore` until a scan succeeds.
 
 ## v1.2.4 (2026-11-13)
 
