@@ -57,3 +57,27 @@ def test_state_follows_claude_config_dir(tmp_path):
     assert "160k" in json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
     assert (cfg / "frugal-bridge" / "state.json").is_file()        # the warn flag lives in the Claude dir in use
     assert not (home / ".claude").exists()                         # and ~/.claude is never created
+
+
+def test_moved_global_home_found_without_frugal_home(tmp_path):
+    """A global install's hook copy finds its home from its own folder (global.json beside it): a home moved with
+    FRUGAL_HOME keeps logging there for a host started without the variable, and ~/.frugal-bridge is never made."""
+    import shutil
+    fh, home = tmp_path / "base" / "engines" / "frugal-bridge", tmp_path / "home"
+    fh.mkdir(parents=True); home.mkdir()
+    (fh / "global.json").write_text("{}")
+    shutil.copy(HOOK, fh / "frugal_hook.py")
+    env = {k: v for k, v in os.environ.items() if k not in ("FRUGAL_HOME", "CLAUDE_CONFIG_DIR")}
+    env["HOME"] = str(home)
+    ev = {"hook_event_name": "PostModelRequest", "session_id": "s", "model": "gpt-6-luna", "status": "completed",
+          "token_usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 1}}
+    r = subprocess.run([sys.executable, str(fh / "frugal_hook.py"), "--tool", "codex", "--event", "usage"],
+                       input=json.dumps(ev), capture_output=True, text=True, env=env, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert (fh / "usage.jsonl").read_text().strip()
+    assert not (home / ".frugal-bridge").exists()
+    (fh / "global.json").unlink()                      # not a global home: the default stays ~/.frugal-bridge
+    r = subprocess.run([sys.executable, str(fh / "frugal_hook.py"), "--tool", "codex", "--event", "usage"],
+                       input=json.dumps(ev), capture_output=True, text=True, env=env, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert (home / ".frugal-bridge" / "usage.jsonl").is_file()

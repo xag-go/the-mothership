@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.3 (2026-11-13)
+
+- Frugal-Bridge `b5d9998` vendored (was `3fee219`): the hook, Hermes plugin and proxy find a moved global home on their
+  own (FRUGAL_HOME, else their own folder when `global.json` sits beside them, else `~/.frugal-bridge`), so hosts started
+  without FRUGAL_HOME no longer re-create the old home; the real-Hermes test skips when the Hermes home is not a folder.
+- Skeleton Base unchanged (1.6.3, `4e8a73a`).
+
 ## v1.2.2 (2026-11-13)
 
 - Skeleton Base 1.6.3 (`4e8a73a`) vendored (was 1.6.2 `0c26c3d`): role rule (a tool's built-in product name is not a role;

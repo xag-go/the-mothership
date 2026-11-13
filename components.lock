@@ -1,11 +1,11 @@
 {
   "components": {
     "frugal-bridge": {
-      "commit": "3fee219742cbd0fef62164f1337cd83249187012",
+      "commit": "b5d99982056934681188e296241299de97b74a24",
       "excluded": [],
       "files": 47,
       "manifest": "components/frugal-bridge.manifest",
-      "manifest_sha256": "2ff1fcf2595a6e33917704bb97e701429ffda8e180a8b67384bf9542f2d72dfb",
+      "manifest_sha256": "de6e3064ce290998925be1da7e370910517be4683e15602a9581700001daf0e7",
       "path": "components/frugal-bridge",
       "repo": "https://github.com/<owner>/frugal-bridge",
       "vendored_from": "local",

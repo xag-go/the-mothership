@@ -118,7 +118,13 @@ def _sf_json(p):
 
 
 def frugal_home():
-    return os.environ.get("FRUGAL_HOME") or os.path.expanduser("~/.frugal-bridge")
+    """FRUGAL_HOME; else the folder of this file when it is the global install's copy (global.json beside it), so a
+    home moved with FRUGAL_HOME keeps working for callers started without the variable; else ~/.frugal-bridge."""
+    e = os.environ.get("FRUGAL_HOME")
+    if e:
+        return e
+    here = os.path.dirname(os.path.realpath(__file__))
+    return here if os.path.isfile(os.path.join(here, "global.json")) else os.path.expanduser("~/.frugal-bridge")
 
 
 def _sf_is_base(d):

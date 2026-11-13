@@ -216,7 +216,8 @@ print("RESULT " + json.dumps(out))
 '''
 
 
-@pytest.mark.skipif(_hermes_runtime() is None, reason="Hermes Agent not installed here")
+@pytest.mark.skipif(_hermes_runtime() is None or not os.path.isdir(REAL_HERMES_HOME),
+                    reason="Hermes Agent not installed here (or its home is not a folder)")
 def test_real_load_through_hermes_plugin_loader(tmp_path):
     py, agent = _hermes_runtime()
     hh = tmp_path / ".hermes"
