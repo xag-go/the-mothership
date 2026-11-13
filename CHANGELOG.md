@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.10 (2026-11-13)
+
+- Skeleton Base 1.6.8 `4ec517a`: `~/.agents/skills` moves whole into the base behind a link; doctor scans the whole
+  home (`~`, `~/.config`, `~/.local/{share,state,bin}`, user units, big product caches, Documents/Desktop/Downloads) and
+  flags anything that is neither in the base nor carries a reason to stay outside; `engine adopt` for desktop apps and
+  MCP folders and `engine adopt NAME --path DIR`; `engine adopt-units` moves real unit files into the base.
+
 ## v1.2.9 (2026-11-13)
 
 - `update` restarts a running watcher (`systemctl --user try-restart` of the services after `enable --now`): before,
