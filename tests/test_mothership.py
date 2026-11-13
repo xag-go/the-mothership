@@ -965,6 +965,15 @@ class FrugalGlobalRefreshTests(Base):
         self.assertIn("(release 0) is not newer", out)
         self.assertEqual(hook.read_bytes(), (FB_VENDOR / "adapter" / "hooks" / "frugal_hook.py").read_bytes())
 
+    def test_update_after_a_tool_is_removed(self):
+        """A tool removed after install: Frugal-Bridge drops its record's file; update and its checks still pass."""
+        self.ms("--yes")
+        (self.bin / "gemini").unlink()
+        out = self.ms("update", "--yes")
+        self.assertIn("checks: all OK", out)
+        g = self.home / ".gemini" / "GEMINI.md"
+        self.assertFalse(g.is_file() and "frugal-bridge:start" in g.read_text())
+
     def test_update_respects_a_newer_own_checkout(self):
         self.ms("--yes")
         mine = self.kit_copy("frugal-mine", "9.0", "MY CHECKOUT")    # newer than any vendored release

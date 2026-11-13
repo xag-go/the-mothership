@@ -27,7 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.2.6"
+VERSION = "1.2.8"
 ROOT = Path(__file__).resolve().parent
 LOCK = "components.lock"
 STATE = ".mothership.json"
@@ -1369,7 +1369,7 @@ class Mothership:
         if own.get("connect") and not conn:
             probs.append("the base is not connected for this user: run install again")
         h = Path(conn.get("home") or home())
-        frugal_files = {Path(i.get("file")) for i in ((reg or {}).get("tools") or {}).values()}
+        frugal_files = {Path(i["file"]) for i in ((reg or {}).get("tools") or {}).values() if i.get("file")}   # absent tools have no file
         for rel in sorted((conn.get("blocks") or {})):
             f = h / rel
             t = read(f)

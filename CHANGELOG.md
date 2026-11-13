@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.8 (2026-11-13)
+
+- `update` (and install) checks no longer crash after a tool is removed: Frugal-Bridge 2.43 drops the rules file from
+  the record of a tool that is not installed, and the check now skips such records. `install.py` VERSION says 1.2.8
+  (1.2.7 still said 1.2.6).
+
 ## v1.2.7 (2026-11-13)
 
 - Every AI tool lives in the base from day one. Skeleton Base 1.6.6 `77eb181` is vendored: a tool counts as installed
