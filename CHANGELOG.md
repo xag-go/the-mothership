@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.6 (2026-11-13)
+
+- Tests leave nothing behind in TMPDIR: the-mothership's own temp dirs get a cleanup right after they are made, and
+  Frugal-Bridge `24bee1c` is vendored (its proxy test and pytest basetemp are removed after a run). Skeleton Base
+  unchanged (1.6.5).
+
 ## v1.2.5 (2026-11-13)
 
 - `update` refreshes the user-level Frugal-Bridge install: it re-runs `install --global --hosts auto` every time instead

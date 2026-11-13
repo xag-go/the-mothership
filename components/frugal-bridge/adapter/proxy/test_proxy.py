@@ -1,6 +1,8 @@
 """End-to-end tests for frugal_proxy: a fake upstream server + the real proxy over HTTP."""
+import atexit
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -62,6 +64,7 @@ def start(server_cls, handler):
 
 
 TMP = tempfile.mkdtemp(prefix="fbproxy-")
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)  # the module-level dir must not outlive the run
 UP = start(ThreadingHTTPServer, Fake)
 cfgp = os.path.join(TMP, "proxy.json")
 json.dump({"port": 0, "data_dir": os.path.join(TMP, "data"), "ctx_warn": 150000, "ctx_hard": 300000,
