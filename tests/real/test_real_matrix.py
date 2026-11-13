@@ -130,6 +130,7 @@ class RealMatrix(unittest.TestCase):
     # ------------------------------------------------------------ plumbing
     def setUp(self):
         self._td = tempfile.TemporaryDirectory(prefix="ms-real-")
+        self.addCleanup(self._td.cleanup)     # before anything else can fail: tearDown does not run after a setUp error
         self.tmp = Path(self._td.name)
         self.home = self.tmp / "home"
         self.home.mkdir()

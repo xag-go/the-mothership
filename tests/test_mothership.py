@@ -78,6 +78,7 @@ class Base(unittest.TestCase):
 
     def setUp(self):
         self._td = tempfile.TemporaryDirectory(prefix="mothership-")
+        self.addCleanup(self._td.cleanup)     # before anything else can fail: tearDown does not run after a setUp error
         self.tmp = Path(self._td.name)
         self.home = self.tmp / "home"
         for d in (".claude", ".codex", ".gemini"):
