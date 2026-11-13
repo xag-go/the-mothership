@@ -13,7 +13,8 @@ grok. The event comes from --event, else from the payload's own event name. What
   tool's own replace-output field (Claude Code updatedToolOutput, Junie updatedToolOutput, Copilot modifiedResult,
   Crush updated_output, Gemini AfterTool deny+reason, Codex PostToolUse block+reason). Tools without one: nothing.
 - usage: token usage of each model call to $FRUGAL_HOME/usage.jsonl (same record as the Hermes plugin, plus `tool`):
-  Claude-style transcripts (Stop), Codex PostModelRequest token_usage, Cursor preCompact context tokens.
+  Claude-style transcripts (Stop), Codex rollout token_usage_record (Stop; PostModelRequest token_usage when no
+  rollout path), Cursor preCompact context tokens.
 Runs once per event: tools that also run Claude Code's hooks (Cursor, Grok, Devin, Continue cn, Copilot with a
 repo .claude/settings.json) would call it twice; the Claude entry stands down when the calling tool has its own
 Frugal entry, and a short-lived marker per event payload drops any second call. Never fails the tool: any error =
@@ -532,9 +533,62 @@ def remember_ctx(host, sid, model, ctx):
     save_hstate(s)
 
 
+def codex_transcript_usages(path, offset=0, model=""):
+    """Codex rollout (JSONL) from byte offset: ([(response id, model, usage)], new offset, last model seen).
+    One token_usage_record per model response (its usage is that response alone; the totals are running sums).
+    The model comes from the turn_context line before it, so the last model is kept across calls."""
+    out = []
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            data = fh.read()
+    except (OSError, TypeError):
+        return out, offset, model
+    end = data.rfind(b"\n") + 1
+    for line in data[:end].splitlines():
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        p = r.get("payload") if isinstance(r, dict) else None
+        if not isinstance(p, dict):
+            continue
+        if r.get("type") == "turn_context" and isinstance(p.get("model"), str) and p["model"]:
+            model = p["model"]
+        elif r.get("type") == "token_usage_record" and isinstance(p.get("usage"), dict):
+            out.append((str(p.get("response_id") or ""), model, p["usage"]))
+    return out, offset + end, model
+
+
+def codex_usage(sid, ev):
+    """Codex usage on Stop (or PostModelRequest, newer Codex). With a rollout path, the rollout is read from the
+    last offset kept per session, so each response is logged once whichever event comes first. Without one, the
+    event's own token_usage (one response) is logged."""
+    key = f"codex:{sid}"
+    tp = ev.get("transcript_path")
+    if not (isinstance(tp, str) and tp and os.path.isfile(tp)):
+        n = norm_usage(ev.get("token_usage"))
+        if n:
+            log_usage("codex", sid, ev.get("model", ""), n); remember_ctx("codex", sid, ev.get("model", ""), n[4])
+        return
+    s = load_hstate(); offs = s.setdefault("offsets", {}); models = s.setdefault("codex_model", {})
+    us, new, model = codex_transcript_usages(tp, offs.get(key, 0), models.get(key, ""))
+    last = None
+    for _rid, m, u in us:
+        n = norm_usage(u)
+        if n:
+            log_usage("codex", sid, m, n); last = (m, n)
+    offs[key] = new; models[key] = model
+    save_hstate(s)
+    if last:
+        remember_ctx("codex", sid, last[0], last[1][4])
+
+
 def usage(host, ev):
     sid = ev.get("session_id") or ev.get("sessionId") or ev.get("conversation_id") or "?"
-    if ev.get("token_usage") is not None or host == "codex":
+    if host == "codex":
+        return codex_usage(sid, ev)
+    if ev.get("token_usage") is not None:
         n = norm_usage(ev.get("token_usage"))
         if n:
             log_usage(host, sid, ev.get("model", ""), n); remember_ctx(host, sid, ev.get("model", ""), n[4])

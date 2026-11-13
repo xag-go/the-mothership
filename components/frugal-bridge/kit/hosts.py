@@ -39,7 +39,7 @@ H = {
         label="Codex CLI (and the ChatGPT desktop app's Codex side)", root=("CODEX_HOME", "~/.codex"), bins=["codex"],
         proof=["@root/config.toml", "@root/auth.json"], rules="@root/AGENTS.md", override="@root/AGENTS.override.md",
         cap=("bytes", 32 * 1024, "combined with the project AGENTS.md (project_doc_max_bytes)"),
-        skills="shared", hooks="codex", filter=True, usage="PostModelRequest token_usage",
+        skills="shared", hooks="codex", filter=True, usage="Stop: rollout token_usage_record (PostModelRequest token_usage on newer Codex)",
         tiers="codex-agents", family="codex-config", proxy="model_providers.<id>.base_url",
         notes="Hooks run only after the user trusts them in /hooks (by hash; re-trust after a change). Output filter = "
               "PostToolUse block+reason (the reason replaces the result; partial)."),
@@ -455,7 +455,7 @@ def hook_spec(t, script, has_claude_hooks):
     if k == "codex":
         return ("json", expand(t, "@root/hooks.json"), {
             "SessionStart": [g("start", "startup|resume|clear|compact")], "UserPromptSubmit": [g("prompt")],
-            "PostToolUse": [g("post_tool", "Bash")], "PostModelRequest": [g("usage")]}, [])
+            "PostToolUse": [g("post_tool", "Bash")], "Stop": [g("usage")], "PostModelRequest": [g("usage")]}, [])
     if k == "gemini":
         n = {"name": "frugal-bridge"}
         return ("jsonc", expand(t, "@root/settings.json"), {

@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.2.4 (2026-11-13)
+
+- Frugal-Bridge `1180c57` vendored (was `b5d9998`): Codex usage is logged on `Stop` from the rollout's
+  `token_usage_record` (Codex CLI 0.159 has no `PostModelRequest`), one count per model response with a per-session
+  offset; the Codex `Stop` hook is installed beside `PostModelRequest`.
+- Skeleton Base 1.6.4 (`d424d7f`) vendored (was 1.6.3 `4e8a73a`): sync all uses one "not scanned yet" rule for
+  sync-scan and doctor, a scan rescans the ignore files it rewrote, doctor warns about pending files only past two
+  watch cycles; the tests give every child process a scrubbed environment (no real tool config dirs).
+
 ## v1.2.3 (2026-11-13)
 
 - Frugal-Bridge `b5d9998` vendored (was `3fee219`): the hook, Hermes plugin and proxy find a moved global home on their

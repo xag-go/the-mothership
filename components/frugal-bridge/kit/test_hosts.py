@@ -441,3 +441,12 @@ def test_upgrade_from_older_install_keeps_keys_added_since(home, monkeypatch):
     after = json.loads(st.read_text())
     assert after["permissions"] == {"additionalDirectories": ["/kb"]} and after["model"] == "opus"
     assert "frugal_hook" not in st.read_text() and after["hooks"] == {"Stop": [{"hooks": [{"type": "command", "command": "mine"}]}]}
+
+
+def test_codex_stop_usage_hook_installed(home, monkeypatch):
+    """Codex CLI 0.159.x has no PostModelRequest event: the usage hook must run on Stop (kept beside the others)."""
+    FH.build(home, ["codex"], monkeypatch, S, HOSTS)
+    assert install("codex") == 0
+    hooks = json.loads(read(home, ".codex/hooks.json"))["hooks"]
+    assert {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "PostModelRequest"} <= set(hooks)
+    assert "--event usage" in json.dumps(hooks["Stop"])

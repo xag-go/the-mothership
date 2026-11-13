@@ -969,3 +969,17 @@ Readings:
 - Shared start-files block: `role_file(host, project_dir, identity_files)`; hooks pass their host, the Hermes plugin
   passes `hermes` + its `SOUL.md` (any own text = own identity = no role file), the proxy passes none.
 - Tests: `adapter/test_roles.py` 5 new; suite 241 passed (tiers + output filter tests unchanged and green).
+
+### 2.41 Codex usage logged on Stop (Codex CLI 0.159.x has no PostModelRequest) (2026-11-13)
+- Bug: the kit installed Codex `PostModelRequest` only; Codex 0.159.3 has no such event, so no Codex line reached
+  usage.jsonl. Codex 0.159.3 hook input (checked in the binary's strings): `session_id`, `transcript_path`, `cwd`,
+  `hook_event_name`, `model`, `turn_id`, `stop_hook_active`, `last_assistant_message`.
+- Rollout (JSONL) shape, checked on 50+ real 0.159.x files: `turn_context.payload.model` gives the model; one
+  `token_usage_record` per model response (`response_id`, `usage` = that response; `thread_token_usage` = running
+  total). Summed `usage.input_tokens` equals the last cumulative `total_token_usage` in 44 of 44 files with both.
+- Change: `frugal_hook.py` Codex usage reads the rollout from `transcript_path` with a per-session offset (state
+  `codex_model` + `offsets`); Stop and PostModelRequest share that offset, so a response is counted once. Without a
+  rollout path, the event's own `token_usage` is logged. `kit/hosts.py` installs Codex `Stop` usage beside the others.
+- Tests: `adapter/hooks/test_hook_codex.py` 7 new (made-up fixtures), `kit/test_hosts.py` 1 new. Suite 245 passed,
+  12 skipped, with the tool env vars set and unset (was 237 + 12). Smoke run on one real rollout: 20 rows, sums match.
+- Not done: `cache_write_input_tokens` is 0 in all samples and is not counted separately (Codex input includes it).
