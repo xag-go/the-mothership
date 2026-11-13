@@ -2,6 +2,32 @@
 
 Changes to the skeleton structure and tools (not to anyone's content).
 
+## v1.6.2 - 2026-11-13
+- **`engine vault NAME [--undo] [--dry-run]`**: the secret files of `engines/NAME` (the same secret names the
+  `.gitignore`/`.stignore` blocks deny; not sessions, caches or logs) move to ONE vault folder outside the base,
+  `<vault>/NAME/<same path>`, and an absolute symlink stays at the old path, so the tool finds its login where it
+  always did. A sub-folder that holds only secret files (Claude's rotating `backups/` of `.claude.json`,
+  `mcp-tokens/`) moves as ONE folder link (source code named after secrets, code checkouts, vendored or installed
+  packages and the safe folders such as `skills/` are never moved), so the new files the tool writes there land in the vault too. Modes are kept; the vault and each tool folder in it are mode 700. Vault root: `engines.json`
+  `"vault"` (`brain.py vault root PATH`, only while the vault is empty), default `~/.<base folder name>-secret`.
+  Close the tool first. `--undo` brings the files back. The exact link paths are added to the `.gitignore` and
+  `.stignore` blocks (also in sync all mode); the registry lives in `.brain/backups/` (local only).
+- **`vault add PATH [--undo] [--dry-run]`** does the same for any other secret file in the base (e.g.
+  `data/<app>/x.token`); tracked files, `raw/`, `.git` and `.brain` are refused. `vault list` shows them.
+- `doctor`: ERROR for a real (not linked) secret file under `engines/` or `data/` (with the command that fixes it,
+  and a note when a tool replaced its link with a new file); INFO with the vaulted count; it writes the generated
+  page `wiki/secrets.md` (tool, path in the base, path in the vault; never contents). It also names the folders
+  outside the base on purpose, with the reason: the backups folder and kit installer records
+  (`~/.local/share/<kit>` with `installed.json`).
+
+## v1.6.1 - 2026-11-12
+- `engine sync-all on|off`: Syncthing shares the whole base (code, engines, logs, ops) except secrets, tool config files (settings.json, config.toml/yaml) and heavy files (node_modules, .git, venvs, DBs, archives); data/, apps/, backups/ stay on this machine; git rules unchanged.
+- **`engine share NAME SUBDIR [--remove]`**: share one more safe sub-folder of a tool folder (e.g. a team's built
+  agents in `engines/claude-worker/team`). Recorded as `"share": [...]` of that engine in `engines.json`; the
+  `.gitignore` and `.stignore` blocks get `!/engines/NAME/SUBDIR` lines after the secret denies and before the
+  deny-all `/engines` line, so keys, sessions and caches inside it stay local. Names that look secret (auth, token,
+  credentials, secret, sessions, `.git`, ...) are refused. `init` updates keep the lines; `guard` and `doctor` know them.
+
 ## v1.6.0 - 2026-11-12
 Everything can live in the base, for any tool:
 - **Each tool's folder follows its own setting.** `connect`, `collect`, `watch` and the hooks resolve every tool's

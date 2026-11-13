@@ -4220,6 +4220,152 @@ class EverythingInBaseTests(ToolHome):
                    "projects/app/main.py", "data/x.bin", "ops/ci.py", "backups/a.tgz"):
             self.assertFalse(synced(no), no)
 
+    def test_sync_all_shares_everything_but_secrets_and_heavy_files(self):
+        pats = [l for l in B.stignore_layout({B.SYNC_ALL: ["all"]}).splitlines() if l and not l.startswith("//")]
+        synced = lambda path: syncthing_allows(pats, path)
+        for ok in ("hot.md", "projects/app/main.py", "projects/app/README.md", "ops/ci.py", "runs/team/r1/out.log",
+                   "scratch/n.md", "engines/claude/skills/s/SKILL.md", "engines/w/team/agents.json",
+                   "engines/w/team/plugins/p/skills/s/SKILL.md", "engines/claude/CLAUDE.md"):
+            self.assertTrue(synced(ok), ok)
+        for no in ("engines/claude/.credentials.json", "engines/claude/.claude.json", "engines/claude/settings.json",
+                   "engines/codex/config.toml", "engines/codex/auth.json", "engines/hermes/config.yaml",
+                   "engines/claude/projects/-k/s.jsonl", "engines/hermes/state.db", "engines/x/api_token",
+                   "projects/app/.env", "projects/app/.env.local", "ops/x/members-e2e.env", "projects/app/.npmrc", "projects/app/k.pem", "projects/app/a/token.json",
+                   "projects/app/node_modules/x/i.js", "projects/app/.git/config", "projects/app/.venv/bin/py",
+                   "data/x.bin", "backups/a.tgz", "apps/x", "runs/a.zst", "projects/app/db.sqlite3"):
+            self.assertFalse(synced(no), no)
+
+    def fake_gitleaks(self):
+        g = self.bin / "gitleaks"
+        g.write_text(f"#!{sys.executable}\n" + """import json, os, sys
+a = sys.argv
+root = a[a.index("dir") + 1]
+flag = [x for x in os.environ.get("FAKE_FLAGGED", "").split(",") if x]
+out = []
+for dp, _, fns in os.walk(root):
+    for f in fns:
+        rel = os.path.relpath(os.path.join(dp, f), root)
+        if rel in flag:
+            out.append({"File": os.path.join(dp, f), "RuleID": "fake-key", "Secret": "REDACTED"})
+open(a[a.index("--report-path") + 1], "w").write(json.dumps(out))
+""")
+        g.chmod(0o755)
+
+    def sync_base(self):
+        self.git(self.base, "init", "-q")
+        self.init(self.base)
+        self.write(self.base, ".stignore", "// mine\n")
+        self.init(self.base)
+        for f in ("ops/a/preview.sh", "ops/a/ok.sh", "wiki/n.md"):
+            self.write(self.base, f, "echo hi\n")
+
+    def test_sync_all_refuses_without_gitleaks(self):
+        self.sync_base()
+        r = self.hb("engine", "sync-all", "on", "--base", str(self.base))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("gitleaks", r.stdout + r.stderr)
+        self.assertNotIn("sync", (self.base / ".brain/engines.json").read_text() if (self.base / ".brain/engines.json").exists() else "")
+
+    def test_sync_scan_denies_flagged_files_and_is_idempotent(self):
+        self.sync_base()
+        self.fake_gitleaks()
+        env = {"FAKE_FLAGGED": "ops/a/preview.sh"}
+        self.ok_env("engine", "sync-all", "on", "--base", str(self.base), env=env)
+        st = (self.base / ".stignore").read_text()
+        self.assertIn("\n/ops/a/preview.sh\n", st)
+        self.assertLess(st.index("/ops/a/preview.sh"), st.index("// sync all"))
+        pats = [l for l in B.stignore_layout({B.SYNC_ALL: ["all"], B.SYNC_DENIED: ["ops/a/preview.sh"]}).splitlines()
+                if l and not l.startswith("//")]
+        self.assertFalse(syncthing_allows(pats, "ops/a/preview.sh"))
+        self.assertTrue(syncthing_allows(pats, "ops/a/ok.sh"))
+        den = json.loads((self.base / ".brain/sync-denied.json").read_text())["denied"]
+        self.assertEqual(den, {"ops/a/preview.sh": ["fake-key"]})
+        self.assertNotIn("REDACTED", (self.base / ".brain/sync-denied.json").read_text())
+        self.ok_env("engine", "sync-scan", "--force", "--base", str(self.base), env=env)
+        self.assertEqual(st, (self.base / ".stignore").read_text())
+        self.ok_env("engine", "sync-scan", "--base", str(self.base), env=env)
+        self.assertEqual(st, (self.base / ".stignore").read_text())
+        self.ok_env("engine", "sync-all", "off", "--base", str(self.base))
+        self.assertNotIn("preview.sh", (self.base / ".stignore").read_text())
+
+    def test_doctor_warns_when_the_scan_is_behind(self):
+        self.sync_base()
+        self.fake_gitleaks()
+        self.ok_env("engine", "sync-all", "on", "--base", str(self.base))
+        r = self.hb("doctor", "--base", str(self.base))
+        self.assertNotIn("brain.py engine sync-scan", r.stdout)
+        self.write(self.base, "ops/a/new.sh", "echo new\n")
+        r = self.hb("doctor", "--base", str(self.base))
+        self.assertIn("brain.py engine sync-scan", r.stdout)
+        self.ok_env("engine", "sync-scan", "--base", str(self.base))
+        r = self.hb("doctor", "--base", str(self.base))
+        self.assertNotIn("brain.py engine sync-scan", r.stdout)
+
+    def test_engine_sync_all_on_and_off_round_trip(self):
+        self.fake_gitleaks()
+        self.git(self.base, "init", "-q")
+        self.init(self.base)
+        self.write(self.base, ".stignore", "// mine\n")
+        self.init(self.base)
+        before = (self.base / ".gitignore").read_text(), (self.base / ".stignore").read_text()
+        self.ok_env("engine", "sync-all", "on", "--base", str(self.base))
+        st = (self.base / ".stignore").read_text()
+        self.assertNotIn("\n/engines\n", st)
+        self.assertIn("\n/data\n", st)
+        self.assertIn(".credentials*", st)
+        self.assertEqual(before[0], (self.base / ".gitignore").read_text())
+        self.ok_env("engine", "sync-all", "off", "--base", str(self.base))
+        self.assertEqual(before, ((self.base / ".gitignore").read_text(), (self.base / ".stignore").read_text()))
+
+    def test_engine_share_adds_a_safe_subfolder_and_secrets_stay_ignored(self):
+        self.git(self.base, "init", "-q")
+        self.init(self.base)
+        self.hb("layout", "--print")
+        self.write(self.base, "engines/w/CLAUDE.md", "x\n")
+        for f in ("engines/w/team/agents.json", "engines/w/team/plugins/p/skills/s/SKILL.md",
+                  "engines/w/team/config.toml", "engines/w/team/.env", "engines/w/team/auth.json",
+                  "engines/w/team/p/token.json", "engines/w/team/sessions/a.md", "engines/w/other/a.json"):
+            self.write(self.base, f, "{}\n")
+        before = (self.base / ".gitignore").read_text(), (self.base / ".stignore").read_text()
+        for bad in ("auth", "sessions/x", "my-token", "credentials", ".git", "a/../b", "*", ""):
+            r = self.hb("engine", "share", "w", bad, "--base", str(self.base))
+            self.assertNotEqual(r.returncode, 0, bad)
+        self.assertEqual(before, ((self.base / ".gitignore").read_text(), (self.base / ".stignore").read_text()))
+        self.ok_env("engine", "share", "w", "team", "--base", str(self.base))
+        self.assertEqual(json.loads((self.base / "engines.json").read_text())["engines"]["w"]["share"], ["team"])
+        gi, st = (self.base / ".gitignore").read_text(), (self.base / ".stignore").read_text()
+        ign = lambda p: subprocess.run(["git", "-C", str(self.base), "check-ignore", "-q", "--no-index", p]
+                                       ).returncode == 0
+        for ok in ("engines/w/team/agents.json", "engines/w/team/plugins/p/skills/s/SKILL.md",
+                   "engines/w/team/config.toml"):
+            self.assertFalse(ign(ok), ok)
+        for no in ("engines/w/team/.env", "engines/w/team/auth.json", "engines/w/team/p/token.json",
+                   "engines/w/team/sessions/a.md", "engines/w/other/a.json"):
+            self.assertTrue(ign(no), no)
+        lines = st.split("// base-folder:end")[0].splitlines()
+        pats = [l for l in lines if l and not l.startswith("//")]
+        synced = lambda path: syncthing_allows(pats, path)
+        self.assertTrue(synced("engines/w/team/agents.json"))
+        self.assertTrue(synced("engines/w/team/plugins/p/skills/s/SKILL.md"))
+        for no in ("engines/w/team/.env", "engines/w/team/auth.json", "engines/w/team/p/token.json",
+                   "engines/w/team/sessions/a.md", "engines/w/other/a.json"):
+            self.assertFalse(synced(no), no)
+        i = pats.index("!/engines/w/team")
+        self.assertLess(pats.index("/engines/**/.env"), i)
+        self.assertLess(i, pats.index("/engines"))
+        self.assertIn(B.stignore_layout({"w": ["team"]}), st)
+        self.ok_env("engine", "share", "w", "team", "--base", str(self.base))          # again: same bytes
+        self.assertEqual((gi, st), ((self.base / ".gitignore").read_text(), (self.base / ".stignore").read_text()))
+        self.init(self.base)                                                              # an update keeps it
+        self.assertEqual((gi, st), ((self.base / ".gitignore").read_text(), (self.base / ".stignore").read_text()))
+        self.git(self.base, "add", "-A")
+        self.assertIn("engines/w/team/agents.json", self.git(self.base, "ls-files"))
+        self.assertNotIn("team/.env", self.git(self.base, "ls-files"))
+        self.assertEqual(self.hb("guard").returncode, 0)
+        self.ok_env("engine", "share", "w", "team", "--remove", "--base", str(self.base))
+        self.assertEqual(before, ((self.base / ".gitignore").read_text(), (self.base / ".stignore").read_text()))
+        self.assertFalse((self.base / "engines.json").exists() and "share" in (self.base / "engines.json").read_text())
+
     def test_mirror_keeps_a_skill_named_like_a_token(self):
         g = self.home / ".gemini"
         self.write(g, "skills/x-token-spend/SKILL.md", "skill\n")
@@ -4286,3 +4432,174 @@ def syncthing_allows(patterns, path):
         if any(rx.match(c) for c in cands):
             return neg
     return True
+
+
+class VaultTests(ToolHome):
+    """engine vault / vault add: secrets leave the base for one vault folder (mode 700); links stay (fake HOME)."""
+
+    SECRETS = ("engines/w/.credentials.json", "engines/w/.claude.json", "engines/w/backups/.claude.json.backup.1",
+               "engines/w/api_token.txt", "engines/w/mcp-tokens/srv.json", "engines/w/team/.env")
+    KEEP = ("engines/w/CLAUDE.md", "engines/w/settings.json", "engines/w/skills/x-token-spend/SKILL.md",
+            "engines/w/sessions/a.jsonl", "engines/w/projects/k/a.jsonl", "engines/w/cache/token.json",
+            "engines/w/team/agents.json", "engines/w/.env.example", "engines/w/lib/git_credentials.py",
+            "engines/w/skills/s/default-credentials.json", "engines/w/repo/.git/HEAD", "engines/w/repo/.env",
+            "engines/w/venv2/lib/site-packages/certifi/cacert.pem")
+    UNITS = ("engines/w/.claude.json", "engines/w/.credentials.json", "engines/w/api_token.txt", "engines/w/backups",
+             "engines/w/mcp-tokens", "engines/w/team/.env")
+
+    def setUp(self):
+        super().setUp()
+        r = subprocess.run(["git", "-C", str(self.base), "init", "-q"], capture_output=True)
+        self.assertEqual(r.returncode, 0)
+        self.init(self.base)
+        for f in self.SECRETS + self.KEEP:
+            p = self.write(self.base, f, f"SECRET-VALUE {f}\n")
+            p.chmod(0o600 if f in self.SECRETS else 0o644)
+        self.vault = self.home / ".base-secret"
+        (self.base / "engines/w/backups").chmod(0o751)
+        self.bmode = 0o751
+
+    def ok_env(self, *args, env=None):
+        r = self.hb(*args, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def ignored(self, rel):
+        return subprocess.run(["git", "-C", str(self.base), "check-ignore", "-q", rel]).returncode == 0
+
+    def test_engine_vault_dry_run_vault_and_undo(self):
+        before = tree(self.base)
+        r = self.ok_env("engine", "vault", "w", "--dry-run", "--base", str(self.base))
+        self.assertEqual(tree(self.base), before)
+        self.assertFalse(self.vault.exists())
+        for f in self.UNITS:
+            self.assertIn(f"would vault: {f}", r.stdout)
+        self.assertIn("would vault: engines/w/backups/ (the whole folder: 1 file(s))", r.stdout)
+        for f in self.KEEP:
+            self.assertNotIn(f + " ", r.stdout)
+        r = self.ok_env("engine", "vault", "w", "--base", str(self.base))
+        self.assertIn("close w", r.stdout)
+        self.assertEqual(stat_mode(self.vault), 0o700)
+        self.assertEqual(stat_mode(self.vault / "w"), 0o700)
+        for f in self.UNITS:                          # a folder of only secrets moves as one folder link
+            p, v = self.base / f, self.vault / "w" / f[len("engines/w/"):]
+            self.assertTrue(p.is_symlink(), f)
+            self.assertEqual(os.readlink(p), str(v))
+            self.assertTrue(os.path.isabs(os.readlink(p)))
+        self.assertEqual(stat_mode(self.vault / "w" / "backups"), 0o700)
+        for f in self.SECRETS:
+            p, v = self.base / f, self.vault / "w" / f[len("engines/w/"):]
+            self.assertFalse(os.path.isfile(p) and not any(self.base / u == p or (self.base / u) in p.parents
+                                                            for u in self.UNITS), f)
+            self.assertEqual(v.read_text(), f"SECRET-VALUE {f}\n")
+            self.assertEqual(p.read_text(), f"SECRET-VALUE {f}\n")          # the tool still reads it there
+            self.assertEqual(stat_mode(v), 0o600)
+        for f in self.UNITS:
+            self.assertTrue(self.ignored(f), f)
+        for f in self.KEEP:
+            self.assertFalse((self.base / f).is_symlink(), f)
+        gs = self.git_status()
+        for f in self.SECRETS:
+            self.assertNotIn(f, gs)
+        st = (self.base / ".stignore").read_text().split("// base-folder:end")[0]
+        pats = [l for l in st.splitlines() if l and not l.startswith("//")]
+        shares = B.engine_shares(self.base)
+        self.assertEqual(shares[B.VAULTED], sorted(self.UNITS))
+        allpats = [l for l in B.stignore_layout({**shares, B.SYNC_ALL: ["all"]}).splitlines()
+                   if l and not l.startswith("//")]
+        for f in self.SECRETS:
+            self.assertFalse(B.syncthing_allows(pats, f), f)
+            self.assertFalse(B.syncthing_allows(allpats, f), f)                 # sync all mode too
+        for f in self.UNITS:
+            self.assertIn("/" + B._st_escape(f), pats)
+        self.assertTrue(B.syncthing_allows(allpats, "engines/w/team/agents.json"))
+        r = self.hb("doctor", "--base", str(self.base))
+        self.assertNotIn("not in the vault", r.stdout)
+        self.assertIn(f"{len(self.UNITS)} secret(s) in the vault", r.stdout)
+        self.write(self.base, "engines/w/backups/.claude.json.backup.2", "SECRET-VALUE new\n")   # the tool rotates
+        os.unlink(self.base / "engines/w/backups/.claude.json.backup.1")
+        self.assertEqual((self.vault / "w/backups/.claude.json.backup.2").read_text(), "SECRET-VALUE new\n")
+        r = self.hb("doctor", "--base", str(self.base))
+        self.assertNotIn("not in the vault", r.stdout)
+        page = (self.base / B.VAULT_PAGE).read_text()
+        self.assertIn("~/.base-secret", page)
+        self.assertIn("`engines/w/.credentials.json`", page)
+        self.assertIn("`engines/w/backups/`", page)
+        self.assertNotIn("SECRET-VALUE", page)
+        self.assertTrue(page.startswith("---\ntitle: Secrets in the vault\n"))
+        self.assertTrue(self.ignored(B.VAULT_REG))
+        again = tree(self.base)
+        self.ok_env("engine", "vault", "w", "--base", str(self.base))           # again: nothing changes
+        self.assertEqual(tree(self.base), again)
+        r = self.ok_env("engine", "vault", "w", "--undo", "--dry-run", "--base", str(self.base))
+        self.assertIn("would bring back: engines/w/.credentials.json", r.stdout)
+        self.assertTrue((self.base / self.SECRETS[0]).is_symlink())
+        self.ok_env("engine", "vault", "w", "--undo", "--base", str(self.base))
+        for f in self.SECRETS[:2] + self.SECRETS[3:]:
+            p = self.base / f
+            self.assertFalse(p.is_symlink(), f)
+            self.assertEqual(p.read_text(), f"SECRET-VALUE {f}\n")
+            self.assertEqual(stat_mode(p), 0o600)
+        self.assertFalse((self.base / "engines/w/backups").is_symlink())
+        self.assertEqual(stat_mode(self.base / "engines/w/backups"), self.bmode)
+        self.assertEqual(sorted(os.listdir(self.base / "engines/w/backups")), [".claude.json.backup.2"])
+        self.assertEqual(list(self.vault.iterdir()), [])
+        self.assertNotIn(B.VAULTED, B.engine_shares(self.base))
+        self.assertNotIn("/engines/w/.credentials.json\n", (self.base / ".stignore").read_text())
+        self.assertIn("No secret is in the vault.", (self.base / B.VAULT_PAGE).read_text())
+
+    def git_status(self):
+        return subprocess.run(["git", "-C", str(self.base), "status", "--porcelain", "--ignored=no", "-uall"],
+                              capture_output=True, text=True).stdout
+
+    def test_vault_add_doctor_errors_and_vault_root(self):
+        tok = self.write(self.base, "data/app/x.token", "SECRET-VALUE t\n")
+        r = self.hb("doctor", "--base", str(self.base))
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("ERROR", r.stdout)
+        self.assertIn("not in the vault: data/app/x.token -> brain.py vault add data/app/x.token", r.stdout)
+        self.assertIn("not in the vault: engines/w/.credentials.json -> brain.py engine vault w", r.stdout)
+        self.assertNotIn("engines/w/sessions", r.stdout)
+        out = self.tmp / "mine-secret"
+        self.assertNotEqual(self.hb("vault", "root", str(self.base / "x"), "--base", str(self.base)).returncode, 0)
+        self.ok_env("vault", "root", str(out), "--base", str(self.base))
+        self.assertEqual(json.loads((self.base / "engines.json").read_text())["vault"], str(out))
+        r = self.ok_env("vault", "add", "data/app/x.token", "--dry-run", "--base", str(self.base))
+        self.assertIn("would vault: data/app/x.token", r.stdout)
+        self.assertFalse(tok.is_symlink())
+        self.ok_env("vault", "add", "data/app/x.token", "--base", str(self.base))
+        self.assertEqual(os.readlink(tok), str(out / "app" / "x.token"))
+        self.assertEqual(stat_mode(out), 0o700)
+        self.assertTrue(self.ignored("data/app/x.token"))
+        self.assertNotEqual(self.hb("vault", "root", str(self.tmp / "other"), "--base", str(self.base)).returncode,
+                            0)                                                   # not while secrets are in it
+        self.ok_env("engine", "vault", "w", "--base", str(self.base))
+        r = self.hb("doctor", "--base", str(self.base))
+        self.assertNotIn("not in the vault", r.stdout)
+        self.assertIn("secret(s) in the vault", r.stdout)
+        self.ok_env("vault", "list", "--base", str(self.base))
+        cred = self.base / "engines/w/.credentials.json"                         # the tool wrote a new file
+        os.unlink(cred); cred.write_text("NEW\n")
+        r = self.hb("doctor", "--base", str(self.base))
+        self.assertIn("engines/w/.credentials.json (the tool replaced its link: vault it again)", r.stdout)
+        self.write(self.base, "wiki/n.md", "x\n")
+        subprocess.run(["git", "-C", str(self.base), "add", "-f", "wiki/n.md"], check=True)
+        r = self.hb("vault", "add", "wiki/n.md", "--base", str(self.base))
+        self.assertIn("tracked in git", r.stdout + r.stderr)
+        for bad in (str(self.tmp / "outside.token"), "raw/a.token"):
+            self.write(self.base, "raw/a.token", "x\n")
+            (self.tmp / "outside.token").write_text("x\n")
+            self.assertNotEqual(self.hb("vault", "add", bad, "--base", str(self.base)).returncode, 0, bad)
+
+    def test_doctor_names_folders_outside_on_purpose(self):
+        (self.home / B.BACKUPS_DIR).mkdir()
+        self.write(self.home, ".local/share/kit/installed.json", "{}\n")
+        self.write(self.home, ".local/share/other/x.txt", "x\n")
+        r = self.hb("doctor", "--base", str(self.base))
+        self.assertIn(f"allowed outside: ~/{B.BACKUPS_DIR}: backups of the base", r.stdout)
+        self.assertIn("allowed outside: ~/.local/share/kit: a kit installer's record", r.stdout)
+        self.assertNotIn("~/.local/share/other", r.stdout)
+
+
+def stat_mode(p):
+    return os.stat(p).st_mode & 0o777

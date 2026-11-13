@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.1 (2026-11-13)
+
+- Skeleton Base 1.6.2 (`0c26c3d`) vendored (was 1.6.0 `9d5991e`; 1.6.1 included): `engine vault` / `vault add` (secrets of an
+  engine in one vault outside the base, symlinks left, rotating backups as one folder link, `undo`), `engine share` and
+  `engine sync-all` with a gitleaks content gate, `doctor` vault checks, `wiki/secrets.md`, folders outside on purpose with reasons.
+- Frugal-Bridge unchanged (`3fee219`).
+
 ## v1.2.0 (2026-11-12)
 
 - Skeleton Base 1.6.0 (`9d5991e`) vendored (was 1.5.4 `84f6e79`): every tool's folder follows its own setting
