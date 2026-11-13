@@ -96,3 +96,12 @@ def test_core_takes_no_name_from_the_user_file():
     assert "Never take a name from `USER.md`" in core and "engines:" in core and "no personal name" in core
     assert "name" not in open(os.path.join(KIT, "templates", "USER.md"), encoding="utf-8").read().lower()
     assert "Name (optional" in open(os.path.join(KIT, "templates", "ROLE.md"), encoding="utf-8").read()
+
+
+def test_core_says_the_tools_own_product_identity_is_not_a_role():
+    """Real run 2026-11-13: Codex answered "I'm Codex" although agents/engineer.md listed codex: "its own identity
+    (system prompt ...)" let the tool's built-in line win. Only an identity the user set counts."""
+    core = open(os.path.join(KIT, "AGENTS.md"), encoding="utf-8").read()
+    assert "identity the user set" in core
+    assert "built-in \"You are <tool>\" line are not a role or a name" in core
+    assert "its own\n  identity (system prompt" not in core

@@ -3472,6 +3472,24 @@ class TidyTests(FileBase):
                            f"Project Alpha {tag} uses {w} buttons on the {w} pricing page.\n")
         self.run_file()
 
+    def test_codex_is_told_to_read_with_read_only_commands(self):
+        """Real run 2026-11-13: Codex has no file-read tool; told "Do not run commands" it read nothing and merged
+        nothing. Its prompt allows read-only shell reads; tools with file tools keep "Do not run commands"."""
+        self.harness("codex")
+        self.alpha_lines(5)
+        r = self.tidy("--harness", "codex", "--force", code=0)
+        self.assertIn("1 page(s) merged", r.stdout)
+        c = self.calls()[-1]
+        self.assertEqual(c[0], "exec")
+        self.assertIn(B.TIDY_SHELL_READS, c[-1])
+        self.assertNotIn(B.TIDY_NO_COMMANDS, c[-1])
+        self.alpha_lines(5, "b")
+        self.tidy("--harness", "claude", "--force", code=0)
+        c = self.calls()[-1]
+        p = c[c.index("-p") + 1]
+        self.assertIn(B.TIDY_NO_COMMANDS, p)
+        self.assertNotIn(B.TIDY_SHELL_READS, p)
+
     def test_trigger_thresholds_and_no_call_when_nothing_pending(self):
         r = self.tidy("--force", code=0)
         self.assertIn("nothing pending", r.stdout)
@@ -3728,6 +3746,18 @@ class RoleTests(ToolHome):
         self.ok("connect")
         self.assertIn(rule, c.read_text())
         self.assertEqual(c.read_text().count("<!-- base-folder:start"), 1)
+
+    def test_tool_product_identity_is_not_a_role(self):
+        """Real run 2026-11-13: Codex answered "I'm Codex" with engineer.md listing codex, because the rule let any
+        system prompt win. The tool's built-in identity must not count; the role's title is the answer."""
+        for t in (B.role_rule(str(self.base) + "/agents"), B.role_rule("agents")):
+            self.assertIn("product name", t)
+            self.assertIn("are not a role and not a name", t)
+            self.assertIn("Only an identity the user set counts", t)
+            self.assertIn("\"who are you?\"", t)
+            self.assertIn("that role's title, not your tool's name", t)
+            self.assertNotIn("Your own identity (your system prompt", t)
+        self.assertIn(B.role_rule("agents"), (REPO / "AGENTS.md").read_text())
 
     def test_engines_list_block_list_and_legacy_engine(self):
         self.assertEqual(B.role_engines(ROLE_TWIN), ["hermes"])

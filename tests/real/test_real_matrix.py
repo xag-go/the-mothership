@@ -55,6 +55,9 @@ NAME, FOCUS, TEA = "Robin Example", "Lighthouse garden", "Moonleaf"
 ASK_A = ("Answer in exactly 3 short lines, no extra text: 1) my name 2) what I am focused on right now "
          "3) which helper model tier (cheap, mid or top) you would give a small bug fix that has tests.")
 ASK_B = f"Remember this for later: my favourite tea is {TEA} oolong. Save it now, then reply with one word: saved."
+ASK_ROLE = "who are you? one line: your role and your name if any"
+TWIN = "TwinName"
+TOOL_WORDS = {"codex", "gemini", "opencode", "claude", "qwen", "hermes", "chatgpt", "openai", "google", "an", "a"}
 GOOGLE_CHEAP = TIERS["cheap"]["google"]["id"]
 # the main model of the Google rows (default: the cheap tier's model). Free-tier keys have a small daily request
 # limit per model: MOTHERSHIP_REAL_GOOGLE_MODEL=another-flash-model spreads the rows over several limits.
@@ -175,11 +178,12 @@ class RealMatrix(unittest.TestCase):
         e.update(kw)
         return e
 
-    def run_cmd(self, cmd, cwd=None, timeout=600, **kw):
+    def run_cmd(self, cmd, cwd=None, timeout=600, stdout_only=False, **kw):
         t0 = time.time()
         r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True, cwd=str(cwd or self.work),
                            env=self.env(**kw), stdin=subprocess.DEVNULL, timeout=timeout)
-        out = r.stdout + ("\n" + r.stderr if r.stderr.strip() else "")
+        out = r.stdout + ("\n" + r.stderr if r.stderr.strip() and not stdout_only else "")
+        self.last_err = r.stderr
         for v in self.secret_env.values():           # never show a key, even if a tool echoes it
             out = out.replace(v, "<key>")
         return r.returncode, out, round(time.time() - t0, 1)
@@ -195,6 +199,14 @@ class RealMatrix(unittest.TestCase):
                 self.skipTest("NOT RUN: node not found on PATH")
             self.extra_path.append(str(Path(node).parent))
         return self.bin / name
+
+    def quota_skip(self, rc, out):
+        """A provider's daily quota or rate limit is not a product result: the row is NOT RUN (with the reason)."""
+        if re.search(r"(?i)\b429\b|RESOURCE_EXHAUSTED|exhausted your daily quota|Quota exceeded for metric", out) and \
+                re.search(r"(?i)quota|rate.?limit", out):
+            m = re.search(r"(?i)(Quota exceeded[^\n']{0,200}|exhausted your daily quota[^\n\"]{0,80}|retry in [\w.]+)", out)
+            self.skipTest("NOT RUN: provider quota (HTTP 429): " + (m.group(1) if m else out.strip()[-200:]))
+        return rc, out
 
     def claude_creds(self):
         cred = Path.home() / ".claude" / ".credentials.json"
@@ -247,14 +259,84 @@ class RealMatrix(unittest.TestCase):
         self.res["checks"][key] = "PASS" if ok is True else ("FAIL" if ok is False else ok)
         self.res["evidence"][key] = evidence
 
+    # ------------------------------------------------------------ f: role / g: tidy (Skeleton Base 1.5+)
+    def role_check(self, answer_of, tool_id, expect_role):
+        """f: agents/twin.md (engines [hermes], name TwinName) + agents/engineer.md (engines [claude-code, codex]);
+        the tool must take the ONE role listing its id (no name), or no role and no personal name; never TwinName."""
+        ag = self.base / "agents"                    # the kit's assistant.md (engines: []) stays: board cards use it
+        (ag / "twin.md").write_text(f"---\ntitle: Twin role\nrole: twin\nengines: [hermes]\nname: {TWIN}\n---\n\n"
+                                    "# Twin\n\nThe owner's digital copy.\n")
+        (ag / "engineer.md").write_text("---\ntitle: Engineer role\nrole: engineer\nengines: [claude-code, codex]\n"
+                                        "---\n\n# Engineer\n\nBuilds and fixes the owner's code.\n")
+        rc, ans, secs = answer_of(ASK_ROLE)
+        low = ans.lower()
+        named = [n for n in re.findall(r"(?i)\b(?:my name is|name:|i am called|call me)\s+([A-Z][\w-]+)", ans)
+                 if n.lower() not in TOOL_WORDS]
+        if expect_role:
+            ok = rc == 0 and expect_role in low and TWIN.lower() not in low and not named
+        else:
+            ok = rc == 0 and TWIN.lower() not in low and "engineer" not in low and not named
+        self.mark("f_role", ok, {"tool_id": tool_id, "expect_role": expect_role or "none, no personal name",
+                                 "answer": ans.strip()[-400:], "names_claimed": named, "secs": secs})
+
+    def tidy_check(self, harness):
+        """g: a scratch copy of the base with lines under '## Collected' on one page; `tidy --force --harness H`
+        passes its own checks (no put-back), the lines are merged and lint has 0 problems."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("sb_brain", self.base / "tools" / "brain.py")
+        B = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(B)
+        tb = self.tmp / "tidy-base"
+        shutil.copytree(self.base, tb, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+        pg = tb / "wiki/projects/lighthouse-garden.md"
+        pg.parent.mkdir(parents=True, exist_ok=True)
+        pg.write_text("---\ntitle: Lighthouse garden\nsources: [notes]\nupdated: 2026-11-11\nscope: private\n---\n\n"
+                      "# Lighthouse garden\n\n- A community garden beside the old lighthouse.\n\nSee [[goals]].\n")
+        facts = ("Lighthouse garden beds are watered every Tuesday morning.",
+                 "Lighthouse garden compost bins sit behind the north wall.",
+                 "Lighthouse garden volunteers meet on the first Saturday of each month.")
+        for i, f in enumerate(facts):
+            c = f + "\n"
+            h = hashlib.sha256(c.encode()).hexdigest()
+            p = tb / "raw/inbox/collected/codex" / f"20261113-garden{i}-{h[:8]}.md"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(B.COLLECT_HEADER.format(src="codex", origin=f"~/.codex/memories/garden{i}.md",
+                                                 at="2026-11-13T09:00:00Z", h=h) + c)
+        br = lambda *a, **k: self.run_cmd([sys.executable, tb / "tools/brain.py", *a], cwd=tb, **k)
+        br("index")
+        br("file", "--base", tb)
+        before = B.section_bullets(pg.read_text(), B.COLLECTED_H)
+        rc, out, secs = br("tidy", "--base", tb, "--force", "--harness", harness, timeout=1800)
+        log = tb / ".brain/tidy.log"
+        self.res["evidence"]["g_tidy_log"] = log.read_text()[-3000:] if log.is_file() else None
+        after_t = pg.read_text()
+        left = B.section_bullets(after_t, B.COLLECTED_H)
+        kept_ok = all(w in after_t.lower() for w in ("tuesday", "north wall", "saturday"))
+        lrc, lout, _ = br("lint")
+        ok = len(before) >= 3 and rc == 0 and re.search(r"\b[1-9]\d* page\(s\) merged, 0 put back", out) and not left \
+            and kept_ok \
+            and lrc == 0
+        self.mark("g_tidy", ok, {"harness": harness, "collected_before": len(before), "left_after": len(left),
+                                 "facts_in_prose": kept_ok, "tidy_rc": rc, "tidy_out": out.strip()[-700:],
+                                 "lint_rc": lrc, "lint_out": lout.strip()[-300:], "secs": secs})
+        shutil.rmtree(tb, ignore_errors=True)
+
     # ------------------------------------------------------------ one row
-    def row(self, name, prompt, own_files, rules_file, tier_check, memory=True, delegation=None, before_snap=None):
-        """prompt(text) -> (rc, out, secs); own_files = regexes of the tool's own session/cache paths."""
+    def row(self, name, prompt, own_files, rules_file, tier_check, memory=True, delegation=None, before_snap=None,
+            role=None, tidy=None, own_edits=None):
+        """prompt(text) -> (rc, out, secs); own_files = regexes of the tool's own session/cache paths.
+        role = (answer_of(text) -> (rc, final answer only, secs), tool id, expected role or None); tidy = harness."""
         if ROWS and name not in ROWS:
             self.skipTest(f"not selected (MOTHERSHIP_REAL_ROWS={','.join(ROWS)})")
         if before_snap:
             before_snap()
         h0 = tree(self.home)
+        pre = {}                                     # small config texts, to show a diff when one is left changed
+        for k in h0:
+            p = self.home / k
+            if re.search(r"\.(toml|json|md|yaml|yml)$", k) and not k.startswith("skeleton-base") and p.is_file() \
+                    and p.stat().st_size < 65536:
+                pre[k] = p.read_text(errors="replace")
         rc, out, secs = self.ms("--yes")
         self.res["install"] = {"rc": rc, "secs": secs, "tail": out.strip().splitlines()[-25:]}
         self.assertIn(rc, (0, 1), out)
@@ -287,18 +369,23 @@ class RealMatrix(unittest.TestCase):
         self.mark("b_writes_base", bool(hits), hits or "fact not found in the base (wiki/, raw/, hot.md)")
 
         # c
-        if memory:
+        if memory is True:
             rc, out, _ = self.brain("collect", "--base", self.base)
             new = sorted(set(self.collected()) - before_collected)
             with_tea = self.collected(TEA)
             self.mark("c_memory_collected", bool(with_tea), {"new_collected": new[:10], "with_fact": with_tea,
                                                               "collect_out": out.strip()[-400:]})
         else:
-            self.mark("c_memory_collected", "N/A", "this tool keeps no local memory store")
+            self.mark("c_memory_collected", "N/A", memory if isinstance(memory, str) else
+                      "this tool keeps no local memory store")
 
         if delegation:
             ok, ev = delegation()
             self.mark("delegation", ok, ev)
+        if role:
+            self.role_check(*role)
+        if tidy:
+            self.tidy_check(tidy)
 
         # e
         rc, out, secs = self.ms("uninstall")
@@ -315,11 +402,20 @@ class RealMatrix(unittest.TestCase):
         # kept on purpose: Frugal-Bridge's usage log is your data (its uninstall never deletes it)
         kept = [k for k in changed if k in (".frugal-bridge/", ".frugal-bridge/usage.jsonl")]
         other = [k for k in changed if k not in own and k not in kept]
+        tool_edits = [k for k in other if k in (own_edits or {}) and (self.home / k).is_file() and
+                      own_edits[k](pre.get(k, ""), (self.home / k).read_text(errors="replace"))]
+        other = [k for k in other if k not in tool_edits]   # e.g. Codex's own project-trust entries in its config
+        import difflib
+        diffs = {k: "".join(difflib.unified_diff(pre.get(k, "").splitlines(True),
+                                                 (self.home / k).read_text(errors="replace").splitlines(True)))[-1500:]
+                 for k in other if (self.home / k).is_file() and (k in pre or k.endswith((".toml", ".json", ".md")))}
+        if diffs:
+            self.res["evidence"]["e_diffs"] = diffs
         self.mark("e_uninstall_identical", rc == 0 and not other,
                   {"tool_own_groups": groups(own), "tool_own_count": len(own), "other_changes": other[:60],
                    "tool_config_changed": [k for k in own if re.search(r"(config\.yaml|settings\.json|opencode\.json|"
                                                                         r"SOUL\.md|\.claude\.json)$", k)],
-                   "kept_by_design": kept,
+                   "kept_by_design": kept, "tool_own_edits": tool_edits,
                    "base_kept": self.base.is_dir(),
                    "backups": sorted(os.listdir(self.home / "skeleton-base-backups"))
                    if (self.home / "skeleton-base-backups").is_dir() else []})
@@ -547,8 +643,9 @@ class RealMatrix(unittest.TestCase):
             "general": {"enableAutoUpdate": False}, "privacy": {"usageStatisticsEnabled": False}}, indent=2) + "\n")
 
         def prompt(q):                # the project folder is trusted, as the user does once per project
-            return self.run_cmd([gemini, "-p", q, "-m", GOOGLE_MAIN, "--approval-mode", "yolo"], timeout=600,
-                                GEMINI_CLI_TRUST_WORKSPACE="true")
+            rc, out, secs = self.run_cmd([gemini, "-p", q, "-m", GOOGLE_MAIN, "--approval-mode", "yolo"], timeout=600,
+                                         GEMINI_CLI_TRUST_WORKSPACE="true")
+            return (*self.quota_skip(rc, out), secs)
 
         def tiers():
             ok, ev = self.agent_files_check(".gemini/agents", "google", effort_key=None)
@@ -561,10 +658,17 @@ class RealMatrix(unittest.TestCase):
             ok = ok and all(ov.get(a) == lv for a, lv in want.items())
             return ok, ev
 
+        def answer(q):
+            rc, out, secs = self.run_cmd([gemini, "-p", q, "-m", GOOGLE_MAIN, "--approval-mode", "yolo"], timeout=600,
+                                         stdout_only=True, GEMINI_CLI_TRUST_WORKSPACE="true")
+            self.quota_skip(rc, out + "\n" + self.last_err)
+            return rc, out, secs
+
         self.row("gemini-google", prompt,
                  own_files=[r"^\.gemini/(tmp|history|antigravity|cache|commands)(/|$)", r"^\.gemini/(?!settings\.json$)[^/]*\.json$",
                             r"^\.cache/", r"^\.local/state/", r"^\.config/configstore/", r"^\.npm/"],
-                 rules_file=".gemini/GEMINI.md", tier_check=tiers)
+                 rules_file=".gemini/GEMINI.md", tier_check=tiers, role=(answer, "gemini", None),
+                 tidy="gemini" if os.environ.get("MOTHERSHIP_REAL_TIDY_GEMINI") == "1" else None)
 
     def test_qwen_google_openai_compatible(self):
         qwen = self.link_tool("qwen")
@@ -603,21 +707,76 @@ class RealMatrix(unittest.TestCase):
             "small_model": f"google/{GOOGLE_MAIN}", "autoupdate": False}, indent=2) + "\n")   # one model: one quota
 
         def prompt(q):
-            return self.run_cmd([oc, "run", q, "-m", f"google/{GOOGLE_MAIN}"], timeout=600)
+            rc, out, secs = self.run_cmd([oc, "run", q, "-m", f"google/{GOOGLE_MAIN}"], timeout=600)
+            return (*self.quota_skip(rc, out), secs)
 
         def tiers():
             return self.agent_files_check(".config/opencode/agents", "google", model_of=lambda m: f"google/{m}",
                                           effort_key=None,
                                           effort_fmt=lambda m, e: m + (f"#{e}" if e != "medium" else ""))
 
+        def answer(q):
+            rc, out, secs = self.run_cmd([oc, "run", q, "-m", f"google/{GOOGLE_MAIN}"], timeout=600, stdout_only=True)
+            self.quota_skip(rc, out + "\n" + self.last_err)
+            return rc, out, secs
+
         self.row("opencode-google", prompt,
                  own_files=[r"^\.local/share/opencode(/|$)", r"^\.local/state/", r"^\.cache/",
                             r"^\.config/opencode/(node_modules|package\.json|package-lock\.json|bun\.lock|\.gitignore)",
                             r"^\.bun/", r"^\.npm/"],
-                 rules_file=".config/opencode/AGENTS.md", tier_check=tiers, memory=False)
+                 rules_file=".config/opencode/AGENTS.md", tier_check=tiers, memory=False,
+                 role=(answer, "opencode", None))
 
     def test_codex_openai(self):
-        self.skipTest("NOT RUN: Codex + OpenAI: the account's usage limit is reached until 2026-11-13")
+        codex = self.link_tool("codex")
+        src = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "auth.json"
+        if not src.is_file():
+            self.skipTest("NOT RUN: no Codex auth.json (CODEX_HOME or ~/.codex)")
+        cx = self.home / ".codex"
+        cx.mkdir()
+        shutil.copy2(src, cx / "auth.json")                    # deleted with the temp HOME
+        model = os.environ.get("MOTHERSHIP_REAL_CODEX_MODEL") or TIERS["mid"]["openai"]["id"]
+        (cx / "config.toml").write_text(f'model = "{model}"\nmodel_reasoning_effort = "medium"\n')
+        self.res["main_model_codex"] = model
+        last = self.tmp / "codex-last.txt"
+
+        def answer(q):                # the final message only (tool output on stderr may quote files)
+            last.unlink(missing_ok=True)
+            rc, out, secs = self.run_cmd([codex, "exec", "--skip-git-repo-check", "-s", "workspace-write",
+                                          "-o", last, q], timeout=900)
+            if rc:
+                self.res["evidence"].setdefault("codex_errors", []).append(out.strip()[-600:])
+            if re.search(r"(?i)usage limit|rate limit reached|purchase more credits", out):
+                self.skipTest("NOT RUN: Codex usage limit: " + out.strip()[-300:])
+            return rc, last.read_text() if last.is_file() else "", secs
+
+        def tiers():
+            exp = expected_tiers("openai")
+            got, bad = {}, []
+            for agent, (mid, eff) in exp.items():
+                p = cx / "agents" / f"{agent}.toml"
+                t = p.read_text() if p.is_file() else ""
+                kv = dict(re.findall(r'^(\w+) = "([^"]*)"$', t, re.M))
+                got[agent] = {k: kv.get(k) for k in ("model", "model_reasoning_effort")}
+                if kv.get("model") != mid or kv.get("model_reasoning_effort") != eff or kv.get("name") != agent:
+                    bad.append(f"{agent}: {got[agent]} != {(mid, eff)}")
+            return (not bad and bool(exp)), {"expected_from_tiers.json": exp, "written": got, "mismatch": bad}
+
+        def trust_only(before, after):    # Codex adds [projects."DIR"] trust_level itself (the folder it ran in)
+            rest = re.sub(r'\n*\[projects\."[^"\n]+"\]\ntrust_level = "\w+"\n', "\n", after)
+            return rest.strip() == before.strip()
+
+        self.row("codex-openai", answer,
+                 own_files=[r"^\.codex/(sessions|log|logs|cache|shell_snapshots|tmp|\.tmp|sqlite|memories|"
+                            r"memories_v2|plugins|packages|vendor_imports|rollout-migrations|thread-writer-locks|"
+                            r"ipc|skills/\.system)(/|$)", r"^\.codex/[^/]*\.(sqlite|sqlite-shm|sqlite-wal|jsonl)$",
+                            r"^\.codex/(models_cache|version|external_agent_session_imports)\.json$",
+                            r"^\.codex/(installation_id|\.sandbox_migration)$", r"^\.codex/auth\.json$", r"^\.cache/",
+                            r"^\.local/state/"],
+                 own_edits={".codex/config.toml": trust_only},
+                 rules_file=".codex/AGENTS.md", tier_check=tiers,
+                 memory="Codex memories are off by default and built later in the background (no item in one run)",
+                 role=(answer, "codex", "engineer"), tidy="codex")
 
 
 if __name__ == "__main__":

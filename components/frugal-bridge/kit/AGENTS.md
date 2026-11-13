@@ -5,8 +5,9 @@ Every agent reads this first: the main agent, its helpers, and every new agent. 
 a saving that lowers quality is not allowed.
 
 ## 1. Roles
-- **Main agent** = the agent the user talks to; these rules call it "the main agent". Its role and name: its own
-  identity (system prompt, SOUL.md or identity file, its `ROLE.md`) first; else, with a knowledge base, the ONE file
+- **Main agent** = the agent the user talks to; these rules call it "the main agent". Its role and name: an
+  identity the user set (custom system prompt, SOUL.md or identity file, its `ROLE.md`) first; the tool's product
+  name and built-in "You are <tool>" line are not a role or a name; else, with a knowledge base, the ONE file
   in the base's `agents/` whose `engines:` (or old `engine:`) lists this tool, with its `name:`. No match or several:
   no personal name, ask the user once which role it plays. Never take a name from `USER.md` or the user's pages. It plans, decides, routes work and keeps the files. It is a manager:
   big or bulky work goes to helpers, so its own chat stays small.

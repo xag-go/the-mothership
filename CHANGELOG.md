@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.2.2 (2026-11-13)
+
+- Skeleton Base 1.6.3 (`518485d`) vendored: the role rule says a tool's built-in "You are <tool>" identity is not a
+  role or a name (Codex answered "I'm Codex" with `agents/engineer.md` listing `codex`); `tidy --harness codex` lets
+  Codex read with read-only shell commands (told "Do not run commands" it merged nothing).
+- Frugal-Bridge `693f28b` vendored (was `3fee219`): the same role fix in the CORE rules; the hook finds a moved global
+  home without `FRUGAL_HOME`.
+- Real matrix (`tests/real/`): Codex + OpenAI row (auth copied from `CODEX_HOME`, final answer from `-o`), checks
+  **f** role (twin.md / engineer.md fixture) and **g** tidy (scratch base copy), provider quota (HTTP 429) reported as
+  NOT RUN instead of FAIL, a tool's own config edits (Codex project trust) told apart from leftovers.
+
 ## v1.2.1 (2026-11-13)
 
 - Skeleton Base 1.6.2 (`0c26c3d`) vendored (was 1.6.0 `9d5991e`; 1.6.1 included): `engine vault` / `vault add` (secrets of an
