@@ -953,10 +953,10 @@ class CollectTests(HomeBase):
     def test_missing_stores_and_odd_schemas_do_not_crash(self):
         r = self.ok("collect")
         self.assertIn("collect: 0 new", r.stdout)
-        (self.home / ".hermes").mkdir()
+        self.write(self.home, ".hermes/config.yaml", "x: 1\n")
         con = sqlite3.connect(self.home / ".hermes/memory_store.db")
         con.execute("CREATE TABLE facts (id INTEGER, body TEXT)"); con.commit(); con.close()
-        (self.home / ".codex").mkdir()
+        self.write(self.home, ".codex/auth.json", "x")
         sqlite3.connect(self.home / ".codex/memories_9.sqlite").close()
         self.write(self.home, ".hermes/memories/MEMORY.md", "still collected\n")
         r = self.ok("collect")
@@ -984,6 +984,8 @@ class ConnectTests(HomeBase):
         settings = ('{"model": "x", "hooks": {"SessionEnd": [{"hooks": [{"type": "command", '
                     '"command": "echo bye"}]}]}}')        # compact on purpose: must come back byte-identical
         self.write(self.home, ".claude/settings.json", settings)
+        self.write(self.home, ".claude.json", "{}\n")                  # Claude Code's own file: its proof
+        self.write(self.home, ".codex/auth.json", "{}\n")
         return settings
 
     def test_connect_where_tools_exist_idempotent_and_disconnect_restores(self):
@@ -1049,8 +1051,8 @@ class ConnectTests(HomeBase):
                       "Stop": [{"hooks": [{"type": "command", "command": "echo stop"}]}]}})
 
     def test_new_files_created_and_removed_and_timer(self):
-        for d in (".claude", ".codex", ".gemini"):
-            (self.home / d).mkdir()
+        for f in (".claude.json", ".codex/auth.json", ".gemini/oauth_creds.json"):
+            self.write(self.home, f, "{}\n")                          # each tool's own file: its proof
         home0 = tree(self.home)
         r = self.ok("connect", "--timer")
         for f in (".claude/CLAUDE.md", ".codex/AGENTS.md", ".gemini/GEMINI.md"):
@@ -1078,7 +1080,7 @@ class ConnectTests(HomeBase):
         self.assertFalse((self.home / ".config").exists())
 
     def test_init_keeps_connect_record_and_uninstall_disconnects(self):
-        (self.home / ".claude").mkdir()
+        self.write(self.home, ".claude.json", "{}")
         home0 = tree(self.home)
         self.ok("connect")
         r = run(BRAIN, "init", self.base, "--frugal=no", env={"HOME": str(self.home)})
@@ -1122,9 +1124,9 @@ def proc_status(pid):
 
 
 class WatchBase(HomeBase):
-    def start(self, *extra):
+    def start(self, *extra, path=None):
         self.log = self.tmp / "watch.log"
-        e = test_env(HOME=str(self.home), PATH=os.environ["PATH"])
+        e = test_env(HOME=str(self.home), PATH=path or os.environ["PATH"])
         w = subprocess.Popen([sys.executable, str(self.base / "tools" / "brain.py"), "watch", "--base", str(self.base),
                               "--quiet-s", QUIET, "--max-s", "2", "--log", str(self.log), *extra],
                              env=e, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1327,6 +1329,7 @@ class WatchTests(WatchBase):
 
 class ZeroTouchTests(WatchBase):
     def test_connect_watch_writes_service_kick_hook_and_disconnect_restores(self):
+        self.write(self.home, ".claude.json", "{}\n")
         settings = '{"model": "x"}'
         self.write(self.home, ".claude/settings.json", settings)
         home0 = tree(self.home)
@@ -1365,10 +1368,12 @@ class ZeroTouchTests(WatchBase):
 
     def test_auto_connect_known_unknown_non_ai_needs_user_then_disconnect_byte_identical(self):
         self.write(self.home, ".claude/CLAUDE.md", "# my rules\n")
+        self.write(self.home, ".claude.json", "{}\n")                  # Claude Code's own file: its proof
         (self.home / ".hermes/memories").mkdir(parents=True)     # Hermes without SOUL.md: needs-user
-        home0 = tree(self.home)
+        hb = fake_bin(self.tmp / "hermes-bin", "hermes")          # its program on the watcher's PATH (never the
+        home0 = tree(self.home)                                   # machine's own PATH: it may have no Hermes)
         self.ok("connect", "--watch", "--kick")
-        self.start()
+        self.start(path=os.pathsep.join([str(hb), TEST_PATH]))
         self.settle()
         user = {}                                                 # everything the user (their tools) writes
 
@@ -1376,7 +1381,7 @@ class ZeroTouchTests(WatchBase):
             p = self.write(self.home, r, text); user[r] = text
             return p
         # 1. a known tool installed later: Qwen Code
-        (self.home / ".qwen").mkdir()
+        put(".qwen/oauth_creds.json", "{}")                                  # Qwen Code's own file: installed
         time.sleep(0.2)
         q = put(".qwen/QWEN.md", "## Qwen Added Memories\n- token-qwen-9 prefers tea\n")
         self.assertLess(self.collected_within("token-qwen-9"), 5)
@@ -1429,7 +1434,7 @@ class ZeroTouchTests(WatchBase):
         self.assertEqual(exp, tree(self.home))
 
     def test_watch_without_connect_does_not_touch_home(self):
-        (self.home / ".qwen").mkdir()
+        self.write(self.home, ".qwen/oauth_creds.json", "x")
         home0 = tree(self.home)
         self.start()
         self.settle()
@@ -1679,13 +1684,15 @@ class UninstallKeepsDataTests(HomeBase):
 
     def test_disconnect_never_touches_the_base_data(self):
         b = self.rich_base()
-        (self.home / ".claude").mkdir(exist_ok=True)
+        self.write(self.home, ".claude.json", "{}")
         self.ok("connect")
         t1 = full_tree(b)
         self.ok("disconnect")
         t2 = full_tree(b)
         diff = sorted(k for k in set(t1) | set(t2) if t1.get(k) != t2.get(k))
-        self.assertEqual(diff, [".kits.json"])                                # only its own record
+        own = [k for k in diff if k == "engines.json" or k.startswith("engines/agents-skills")]
+        self.assertTrue(own and all(k not in t2 for k in own), own)          # connect's skills folder goes with it
+        self.assertEqual([k for k in diff if k not in own], [".kits.json"])  # else only its own record
         self.assertEqual(git(b, "rev-list", "--count", "HEAD").strip(), "3")
 
 
@@ -1697,6 +1704,8 @@ class AccessTests(HomeBase):
         return json.loads((self.base / ".kits.json").read_text())["kits"]["base-folder"]["connect"].get("access", {})
 
     def test_pointer_save_step_is_one_allowed_command(self):
+
+        self.write(self.home, ".claude.json", "{}\n")
         """Real Claude Code run: the agent chained `brain.py index` with an `echo >> progress/agents.log` in one shell
         command, which the allow rule connect writes does not match, so the index step was refused. The block now
         says to run the index command on its own (the exact allowed form) and log with the file tools."""
@@ -1715,6 +1724,8 @@ class AccessTests(HomeBase):
         self.assertFalse(fnmatch.fnmatchcase(f"B=x; {cmd}; echo y >> log", rule))
 
     def test_pointer_says_remember_goes_to_the_base_first(self):
+
+        self.write(self.home, ".claude.json", "{}\n")
         """Real Qwen Code run (OpenAI-compatible Gemini): told "remember ...", it saved only to its own memory.
         The block names the request and where a fact about the user goes."""
         self.write(self.home, ".claude/settings.json", "{}")
@@ -1726,6 +1737,7 @@ class AccessTests(HomeBase):
     def test_claude_additional_directories_merged_idempotent_and_given_back(self):
         mine = ('{"model": "x", "permissions": {"allow": ["Read(~/notes/**)"], "additionalDirectories": '
                 '["/srv/other"]}, "hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": "echo bye"}]}]}}')
+        self.write(self.home, ".claude.json", "{}\n")                  # Claude Code's own file: its proof
         p = self.write(self.home, ".claude/settings.json", mine)
         r = self.ok("connect")
         self.assertIn("permissions.additionalDirectories", r.stdout)
@@ -1761,6 +1773,8 @@ class AccessTests(HomeBase):
                                                      "theme": "dark"})
 
     def test_codex_writable_roots_text_merge_every_other_byte_kept(self):
+
+        self.write(self.home, ".codex/auth.json", "{}\n")
         import tomllib
         b = json.dumps(str(self.base))
         cases = {
@@ -1811,7 +1825,7 @@ class AccessTests(HomeBase):
 
     def test_gemini_and_qwen_include_directories(self):
         g = self.write(self.home, ".gemini/settings.json", '{"context": {"fileName": ["AGENTS.md"]}, "theme": "x"}')
-        (self.home / ".qwen").mkdir()
+        self.write(self.home, ".qwen/oauth_creds.json", "x")
         self.ok("connect")
         self.assertEqual(json.loads(g.read_text()), {"context": {"fileName": ["AGENTS.md"],
                                                                  "includeDirectories": [str(self.base)]},
@@ -1876,6 +1890,24 @@ class AccessTests(HomeBase):
         self.assertIn("no wall (its file tools reach any path you can)", out)
 
     def test_every_known_tool_is_found_readable_writable_and_collected(self):
+
+        self.write(self.home, ".claude.json", "{}\n")
+
+        self.write(self.home, ".codex/auth.json", "{}\n")
+
+        self.write(self.home, ".gemini/oauth_creds.json", "{}\n")
+
+        self.write(self.home, ".config/opencode/opencode.json", "{}\n")
+
+        self.write(self.home, ".codeium/windsurf/mcp_config.json", "{}\n")
+
+        self.write(self.home, ".kiro/settings/mcp.json", "{}\n")
+
+        self.write(self.home, ".cursor/cli-config.json", "{}\n")
+
+        self.write(self.home, ".qwen/oauth_creds.json", "{}\n")
+
+        self.write(self.home, ".hermes/config.yaml", "{}\n")
         """The README matrix, one row per known tool: (a) rules block, (b/c) its own access setting, (d) memory."""
         self.make_stores()
         for d in (".qwen", ".config/opencode", ".codeium/windsurf", ".kiro", ".cursor"):
@@ -1954,7 +1986,7 @@ class FrugalGlobalTests(Base):
         self.caps = brain.frugal_caps(self.setup_py)     # what this Frugal-Bridge build can do (from its source)
         self.base = self.fresh()
         self.write(self.home, ".claude/CLAUDE.md", "# my global rules\nUse tabs.\n")
-        (self.home / ".codex").mkdir()
+        self.write(self.home, ".codex/auth.json", "x")
 
     def x(self, *args, extra=None):
         e = dict(os.environ, BRAIN_TODAY="2026-11-11", HOME=str(self.home), FRUGAL_HOME=str(self.fh), PATH=FRUGAL_PATH)
@@ -2262,8 +2294,8 @@ class FrugalGlobalTests(Base):
         self.sb("connect")                          # settle (Frugal changed settings.json after us)
         old = {f: f.read_bytes() for f in self.rules() + [self.home / ".claude/settings.json"]}
         tools0 = json.loads((self.fh / "global.json").read_text())["tools"]
-        (self.home / ".gemini").mkdir()                     # a tool Frugal supports
-        (self.home / ".qwen").mkdir()                       # a tool it does not
+        self.write(self.home, ".gemini/oauth_creds.json", "x")                     # a tool Frugal supports
+        self.write(self.home, ".qwen/oauth_creds.json", "x")                       # a tool it does not
         r = self.x(self.base / "tools" / "brain.py", "watch", "--base", self.base, "--once", "--no-commit")
         g = self.home / ".gemini/GEMINI.md"
         self.assert_order(g)
@@ -2452,6 +2484,8 @@ class SpacePathTests(Base):
         return r
 
     def test_blocks_hooks_and_units_quote_the_path_and_disconnect_restores(self):
+
+        self.write(self.home, ".claude.json", "{}\n")
         home0 = tree(self.home)
         self.hb("connect", "--base", self.base, "--watch", "--kick")
         b = str(self.base)
@@ -2562,6 +2596,7 @@ ALL_FILES = {     # each tool's own (fake) user config before connect: comments 
     ".config/zed/settings.json": '// zed\n{\n  "theme": "One Dark", // keep\n}\n',
     ".junie/allowlist.json": '{\n  "defaultBehavior": "ask", // mine\n  "rules": {}\n}\n',
     ".config/Claude/claude_desktop_config.json": '{"mcpServers": {"fs": {"command": "npx"}}}',
+    ".config/Claude/Local State": '{"os_crypt": {}}',                     # the app's own file: proof it is installed
 }
 ALL_RULES = (".claude/CLAUDE.md", ".codex/AGENTS.md", ".gemini/GEMINI.md", ".qwen/QWEN.md",
              ".config/opencode/AGENTS.md", ".grok/rules/skeleton-base.md",
@@ -2677,6 +2712,7 @@ class WriterTests(unittest.TestCase):
 
 class EveryToolTests(ToolHome):
     def test_every_known_tool_at_once_finds_reads_writes_mcp_then_disconnect_byte_identical(self):
+        self.write(self.home, ".codeium/windsurf/mcp_config.json", "{}\n")
         """The README matrix, one row per tool, all tools at once (fake HOME, fake programs on PATH)."""
         self.every_tool()
         home0 = tree(self.home)
@@ -2882,7 +2918,7 @@ class SharedFileTests(ToolHome):
 
     def test_kilo_and_devin_through_claude_md_unless_they_have_their_own(self):
         self.bins("claude", "kilo", "devin")
-        (self.home / ".claude").mkdir()
+        self.write(self.home, ".claude.json", "{}")
         self.write(self.home, ".config/kilo/kilo.json", "{}")
         self.write(self.home, ".config/devin/config.json", '{"read_config_from": {"claude": false}}')
         self.ok("connect")
@@ -2897,6 +2933,8 @@ class SharedFileTests(ToolHome):
         self.assertEqual((self.home / ".config/kilo/AGENTS.md").read_text(), "# my kilo rules\n")
 
     def test_codex_override_file_wins_and_size_caps_are_checked(self):
+
+        self.write(self.home, ".codex/auth.json", "{}\n")
         self.write(self.home, ".codex/AGENTS.override.md", "x" * 17000 + "\n")
         self.write(self.home, ".hermes/SOUL.md", "s" * 19500 + "\n")
         r = self.ok("connect")
@@ -2926,6 +2964,7 @@ class SharedFileTests(ToolHome):
 
 class HookTwiceTests(ToolHome):
     def test_our_hooks_run_by_a_second_tool_do_nothing_harmful(self):
+        self.write(self.home, ".claude.json", "{}\n")
         """Grok, Cursor, Devin, Continue cn and Copilot also run the hooks in ~/.claude/settings.json, with their
         own payloads and folders: each run exits 0, prints nothing (hosts parse stdout), collects every item once."""
         self.make_stores()
@@ -2933,7 +2972,7 @@ class HookTwiceTests(ToolHome):
         hooks = json.loads((self.home / ".claude/settings.json").read_text())["hooks"]
         collect = hooks["SessionEnd"][0]["hooks"][0]["command"]
         kick = hooks["PostToolUse"][0]["hooks"][0]["command"]
-        (self.home / ".cursor").mkdir()
+        self.write(self.home, ".cursor/cli-config.json", "{}")
         payloads = ('{"hook_event_name": "SessionEnd", "session_id": "c1"}',
                     '{"hook_event_name": "sessionEnd", "cursor_version": "3.2", "conversation_id": "x"}',
                     '{"hookEventName": "SessionEnd", "devin": true}', "", "not json at all")
@@ -3704,6 +3743,8 @@ class RoleTests(ToolHome):
     """Who am I: the tool's own identity first, else the ONE role in agents/ that lists the tool, never wiki/me/."""
 
     def test_rule_in_every_tool_block_print_and_agents_md_then_disconnect_byte_identical(self):
+
+        self.write(self.home, ".codeium/windsurf/mcp_config.json", "{}\n")
         self.every_tool()
         home0 = full_tree(self.home)
         self.ok("connect")
@@ -4443,6 +4484,8 @@ open(a[a.index("--report-path") + 1], "w").write(json.dumps(out))
         self.assertFalse((self.base / "engines.json").exists() and "share" in (self.base / "engines.json").read_text())
 
     def test_mirror_keeps_a_skill_named_like_a_token(self):
+
+        self.write(self.home, ".gemini/oauth_creds.json", "{}\n")
         g = self.home / ".gemini"
         self.write(g, "skills/x-token-spend/SKILL.md", "skill\n")
         self.write(g, "skills/x-token-spend/token.json", '{"a": 1}')
@@ -5021,3 +5064,359 @@ open(a[a.index("--report-path") + 1], "w").write(json.dumps(out))
 
 def stat_mode(p):
     return os.stat(p).st_mode & 0o777
+
+
+# ---------------------------------------------------------------- base-first: installed = proof, mirrors, doctor
+class BaseFirstTests(ToolHome):
+    """A folder is never proof that a tool is installed (connect makes folders itself); a mirror of a tool that is
+    not installed, or of a source inside the base, goes; a tool that becomes installed is adopted, not mirrored."""
+
+    def tool_dirs_made(self, bins):
+        """The programs are there and their folders exist (the way a real install looks)."""
+        for key, t in B.TOOLS.items():
+            if any(b in bins for b in t.get("bins", ())) and t.get("dir", key):
+                (self.home / t.get("dir", key)).mkdir(parents=True, exist_ok=True)
+
+    def registry(self):
+        return json.loads((self.base / "engines.json").read_text()).get("engines", {})
+
+    def test_a_folder_alone_is_not_proof_of_an_install(self):
+        (self.home / ".config/opencode").mkdir(parents=True)
+        self.ok("connect")
+        self.assertFalse((self.home / ".config/opencode/AGENTS.md").exists(), "a bare folder is not proof")
+
+    def test_a_tool_that_is_not_installed_loses_our_block_and_leaves_no_folder_behind(self):
+        self.bins(*ALL_BINS)
+        self.tool_dirs_made(ALL_BINS)
+        self.ok("connect")
+        self.assertTrue(self.blocks(".config/opencode/AGENTS.md"), "installed: the block is there")
+        for b in ALL_BINS:
+            os.unlink(self.bin / b)
+        self.ok("connect")
+        left = [r for r in ALL_RULES if (self.home / r).exists() and self.blocks(r)
+                and r != ".config/skeleton-base/AGENTS.md"]          # the base pointer, not a tool's
+        self.assertEqual(left, [], "no program on PATH: connect keeps no block of ours")
+        self.assertFalse((self.home / ".config/opencode/AGENTS.md").exists())    # created by us: removed
+        self.assertEqual(os.listdir(self.home / ".config/opencode"), [], "the folder is left empty, never filled")
+        backed = [p for p in (self.base / ".brain/backups").rglob("AGENTS.md") if ".config/opencode" in str(p)]
+        self.assertTrue(backed, "what connect deletes is archived first")
+
+    def test_a_mirror_of_a_tool_that_is_not_installed_is_removed(self):
+        self.bins("gemini")
+        self.write(self.home, ".gemini/settings.json", "{}")
+        self.ok("engine", "mirror", "gemini", "--base", str(self.base))
+        self.assertTrue((self.base / "engines/gemini/MIRROR").is_file())
+        os.unlink(self.bin / "gemini")
+        os.unlink(self.home / ".gemini/settings.json")                      # its own proof file is gone too
+        self.ok("watch", "--once", "--no-commit")
+        self.assertFalse((self.base / "engines/gemini").exists())
+        self.assertNotIn("gemini", self.registry())
+
+    def test_a_mirror_of_a_source_inside_the_base_is_removed(self):
+        src = self.base / "projects/teamx/team"
+        src.mkdir(parents=True)
+        (src / "a.md").write_text("team\n")
+        self.write(self.base, "engines/teamx-team/MIRROR", "MIRROR: old copy\n")
+        self.write(self.base, "engines/teamx-team/a.md", "team\n")
+        reg = {"engines": {"teamx-team": {"mode": "mirror", "src": str(src), "since": "2026-11-13"}}}
+        (self.base / "engines.json").write_text(json.dumps(reg))
+        self.ok("watch", "--once", "--no-commit")
+        self.assertFalse((self.base / "engines/teamx-team").exists())
+        self.assertNotIn("teamx-team", self.registry())
+        self.assertTrue((src / "a.md").is_file(), "the source is never touched")
+
+    def test_the_agents_skills_mirror_is_dropped(self):
+        self.write(self.base, "engines/agents-skills/MIRROR", "MIRROR: old copy\n")
+        reg = {"engines": {"agents-skills": {"mode": "mirror", "src": "~/.agents/skills", "since": "2026-11-13"}}}
+        (self.base / "engines.json").write_text(json.dumps(reg))
+        self.ok("watch", "--once", "--no-commit")
+        self.assertFalse((self.base / "engines/agents-skills").exists())
+        self.assertNotIn("agents-skills", self.registry())
+
+    def test_doctor_counts_a_mirror_as_outside_with_its_reason(self):
+        self.bins("gemini")
+        self.write(self.home, ".gemini/settings.json", "{}")
+        self.ok("engine", "mirror", "gemini", "--base", str(self.base))
+        out = self.ok("doctor", "--base", str(self.base)).stdout
+        line = next(x for x in out.splitlines() if x.startswith(("OK", "OUTSIDE")) and "Gemini CLI" in x)
+        self.assertTrue(line.startswith("OUTSIDE"), line)
+        self.assertIn("no setting moves it", line)
+
+    def test_doctor_warns_about_our_block_in_a_tool_that_is_not_installed(self):
+        self.bins("opencode")
+        (self.home / ".config/opencode").mkdir(parents=True)
+        self.ok("connect")
+        block = (self.home / ".config/opencode/AGENTS.md").read_text()
+        os.unlink(self.bin / "opencode")
+        self.write(self.home, ".config/opencode/AGENTS.md", block)                  # left behind, tool gone
+        out = self.ok("doctor", "--base", str(self.base)).stdout
+        self.assertRegex(out, r"WARN\s+opencode.*not installed.*brain\.py connect")
+
+    def test_a_tool_that_becomes_installed_is_adopted_into_the_base(self):
+        self.ok("connect")
+        self.ok("watch", "--once", "--no-commit")                                   # first run: nothing installed
+        self.bins("claude")
+        self.write(self.home, ".claude/settings.json", "{}")
+        self.ok("watch", "--once", "--no-commit")
+        self.assertTrue((self.base / "engines/claude/settings.json").is_file(), "adopted, not mirrored")
+        self.assertNotIn("claude", [k for k, v in self.registry().items() if v.get("mode") == "mirror"])
+
+
+def ltree(d):
+    """{rel: sha | 'dir' | 'link:<target>'} without following links (a dangling Electron lock is a link)."""
+    d, out = pathlib.Path(d), {}
+    for dp, dns, fns in os.walk(d):
+        for n in sorted(dns + fns):
+            p = pathlib.Path(dp) / n
+            r = p.relative_to(d).as_posix()
+            if p.is_symlink():
+                out[r] = "link:" + os.readlink(p)
+            elif p.is_dir():
+                out[r] = "dir"
+            else:
+                out[r] = hashlib.sha256(p.read_bytes()).hexdigest() + oct(p.stat().st_mode & 0o777)
+    return out
+
+
+def dead_pid():
+    p = subprocess.Popen(["true"])
+    p.wait()
+    return p.pid
+
+
+class AdoptByLinkTests(ToolHome):
+    """engine adopt for a tool with no setting that moves its folder: the folder moves into engines/<name> and a
+    symlink stays at the old place; secrets go to the vault, heavy folders stay out of git and Syncthing (fake HOME)."""
+
+    APP = ".config/Claude"
+    SECRETS = ("Cookies", "Cookies-journal", "buddy-tokens.json", "ant-did", "ant-device-registry.json",
+               "Trust Tokens", "Trust Tokens-journal", "claude_desktop_config.json", "config.json")
+    SECRET_DIRS = ("Local Storage", "Session Storage", "IndexedDB")
+    HEAVY = ("vm_bundles", "claude-code-vm", "claude-code", "Cache", "Code Cache", "GPUCache", "DawnGraphiteCache",
+             "DawnWebGPUCache", "Crashpad", "logs", "sentry", "blob_storage", "Shared Dictionary")
+
+    def setUp(self):
+        super().setUp()
+        self.eng = self.base / "engines"
+        self.vault = self.home / ".base-secret"
+
+    def app(self, home=None, lock=None):
+        """A small ~/.config/Claude that looks like the real Claude desktop app."""
+        a = pathlib.Path(home or self.home) / self.APP
+        for f in self.SECRETS:
+            self.write(a, f, f"SECRET-VALUE {f}\n").chmod(0o600)
+        self.write(a, "config.json", '{"locale": "en-US", "oauth:tokenCache": "SECRET-VALUE"}\n').chmod(0o600)
+        self.write(a, "Local State", '{"os_crypt": {}}\n')
+        self.write(a, "Preferences", "{}\n")
+        self.write(a, "window-state.json", "{}\n")
+        self.write(a, "fcache", "x\n")
+        for d in self.SECRET_DIRS:
+            self.write(a, f"{d}/leveldb/000003.log", f"SECRET-VALUE {d}\n")
+        for d in self.HEAVY:
+            self.write(a, f"{d}/blob.bin", "heavy\n")
+        os.symlink(lock or f"{os.uname().nodename}-{dead_pid()}", a / "SingletonLock")
+        os.symlink("/tmp/scoped_dir-nothing/SingletonSocket", a / "SingletonSocket")
+        return a
+
+    def reg(self):
+        p = self.base / "engines.json"
+        return json.loads(p.read_text()).get("engines", {}) if p.is_file() else {}
+
+    def adopt(self, *extra):
+        return self.hb("engine", "adopt", "claude-desktop", "--base", str(self.base), *extra)
+
+    def test_claude_desktop_adopt_vault_heavy_doctor_and_undo(self):
+        a = self.app()
+        before = ltree(a)
+        self.write(self.eng, "Claude/MIRROR", "MIRROR: old copy\n")             # today's mirror of the app
+        self.write(self.eng, "Claude/Preferences", "{}\n")
+        (self.base / "engines.json").write_text(json.dumps(
+            {"engines": {"Claude": {"mode": "mirror", "src": "~/.config/Claude", "since": "2026-11-12"}}}))
+        r = self.adopt()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        dest = self.eng / "claude-desktop"
+        self.assertTrue(a.is_symlink(), "a link stays at the old place")
+        self.assertEqual(os.path.realpath(a), str(dest.resolve()))
+        self.assertEqual((a / "Local State").read_text(), '{"os_crypt": {}}\n', "readable through the link")
+        e = self.reg()["claude-desktop"]
+        self.assertEqual((e["mode"], e.get("link"), e["from"]), ("adopted", True, "~/.config/Claude"))
+        self.assertNotIn("Claude", self.reg(), "the mirror's registry entry goes")
+        self.assertFalse((self.eng / "Claude").exists(), "the mirror folder goes")
+        for f in self.SECRETS + self.SECRET_DIRS:                              # F3: secrets are links into the vault
+            self.assertTrue((dest / f).is_symlink(), f)
+            self.assertTrue(in_dir_of(os.readlink(dest / f), self.vault / "claude-desktop"), f)
+        self.assertEqual((a / "Cookies").read_text(), "SECRET-VALUE Cookies\n")
+        self.assertEqual((a / "Local Storage/leveldb/000003.log").read_text(), "SECRET-VALUE Local Storage\n")
+        for d in self.HEAVY:                                                   # heavy: never walked into the vault
+            self.assertFalse((dest / d).is_symlink(), d)
+        self.assertFalse((dest / "Local State").is_symlink())
+        moves = json.loads((self.base / ".brain/moves.json").read_text())["moves"]
+        self.assertEqual(moves[-1]["kind"], "engine")
+        gi, st = (self.base / ".gitignore").read_text(), (self.base / ".stignore").read_text()
+        for d in self.HEAVY:                                                   # F4: out of git and Syncthing
+            self.assertIn(f"/engines/claude-desktop/{d}/", gi)
+            self.assertIn(f"/engines/claude-desktop/{d}\n", st)
+        pats = [l.strip() for l in B.stignore_layout({B.SYNC_ALL: ["all"]}).splitlines()
+                if l.strip() and not l.startswith("//")]
+        self.assertFalse(B.syncthing_allows(pats, "engines/claude-desktop/vm_bundles/blob.bin"), "not even sync all")
+        self.assertFalse(B.syncthing_allows(pats, "engines/claude-desktop/Code Cache/blob.bin"))
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertNotRegex(out, r"ERROR.*(claude-desktop|Claude app)")
+        r = self.hb("vault", "list", "--base", str(self.base))
+        self.assertIn("engines/claude-desktop/Cookies", r.stdout)
+        # F7: the link replaced by a real folder (the app made a fresh one) is an ERROR with the fix
+        os.unlink(a)
+        a.mkdir()
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertRegex(out, r"ERROR.*~/\.config/Claude.*real folder.*ln -s")
+        a.rmdir()
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertRegex(out, r"ERROR.*~/\.config/Claude.*(missing|broken).*ln -s")
+        os.symlink(str(dest), a)
+        # undo: the folder comes back exactly, the vault gives the secrets back
+        r = self.adopt("--undo")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(a.is_symlink())
+        self.assertEqual(ltree(a), before)
+        self.assertFalse(dest.exists())
+        self.assertNotIn("claude-desktop", self.reg())
+        self.assertFalse(any(p.is_file() for p in self.vault.rglob("*")) if self.vault.exists() else False)
+
+    def test_refuses_while_the_app_runs(self):
+        p = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        a = self.app(lock=f"{os.uname().nodename}-{p.pid}")
+        before = ltree(a)
+        for extra in ((), ("--force",)):
+            r = self.adopt(*extra)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("running", r.stdout + r.stderr)
+        self.assertFalse(a.is_symlink())
+        self.assertEqual(ltree(a), before)
+        self.assertFalse((self.eng / "claude-desktop").exists())
+
+    def test_refuses_target_exists_and_a_link_already_in_the_base(self):
+        a = self.app()
+        self.write(self.eng, "claude-desktop/x", "x\n")
+        r = self.adopt()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("exists", r.stdout + r.stderr)
+        self.assertFalse(a.is_symlink())
+        shutil.rmtree(self.eng / "claude-desktop")
+        self.assertEqual(self.adopt().returncode, 0)
+        r = self.adopt()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("already a link into the base", r.stdout + r.stderr)
+
+    def test_a_failed_check_undoes_the_move(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads every file")
+        a = self.app()
+        (a / "Preferences").chmod(0)
+        self.addCleanup(lambda: [x.chmod(0o600) for x in (a / "Preferences", self.eng / "claude-desktop/Preferences")
+                                 if os.path.lexists(x) and not x.is_symlink()])
+        r = self.adopt()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("undone", r.stdout + r.stderr)
+        self.assertTrue(a.is_dir() and not a.is_symlink())
+        self.assertFalse(os.path.lexists(self.eng / "claude-desktop"))
+        self.assertNotIn("claude-desktop", self.reg())
+
+    def test_refuses_a_copy_to_another_filesystem(self):
+        shm = pathlib.Path("/dev/shm")
+        if not shm.is_dir() or os.stat(shm).st_dev == os.stat(self.base).st_dev:
+            self.skipTest("no second filesystem")
+        h = pathlib.Path(tempfile.mkdtemp(prefix="skb-xfs-", dir=shm))
+        self.addCleanup(shutil.rmtree, h, True)
+        a = self.app(home=h)
+        before = ltree(a)
+        r = self.hb("engine", "adopt", "claude-desktop", "--base", str(self.base), env={"HOME": str(h)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertRegex(r.stdout + r.stderr, r"different filesystem.*needs .*B")
+        self.assertEqual(ltree(a), before)
+        self.assertFalse(os.path.lexists(self.eng / "claude-desktop"))
+
+    def test_the_claude_app_row_proves_an_install_by_its_own_files(self):
+        t = B.TOOLS[".config/Claude"]
+        self.assertEqual((t["status"], t["bins"]), ("app", ()))
+        self.assertIn(".config/Claude/Local State", t["marks"])
+        self.assertIn(".config/Claude/config.json", t["marks"])
+        self.assertIn("SingletonLock", t["locks"])
+
+
+def in_dir_of(p, d):
+    p, d = os.path.realpath(str(p)), os.path.realpath(str(d))
+    return p == d or p.startswith(d + "/")
+
+
+class SkillsLinkTests(ToolHome):
+    """connect writes the base's skills into engines/agents-skills and ~/.agents/skills is a link to it (F6)."""
+
+    def setUp(self):
+        super().setUp()
+        self.bins("codex")
+        self.write(self.home, ".codex/config.toml", 'model = "x"\n')
+        self.link, self.dest = self.home / ".agents/skills", self.base / "engines/agents-skills"
+
+    def reg(self):
+        p = self.base / "engines.json"
+        return json.loads(p.read_text()).get("engines", {}) if p.is_file() else {}
+
+    def test_connect_links_skills_into_the_base_and_disconnect_removes_it(self):
+        home0 = ltree(self.home)
+        self.ok("connect")
+        self.assertTrue(self.link.is_symlink())
+        self.assertEqual(os.path.realpath(self.link), str(self.dest.resolve()))
+        self.assertTrue((self.dest / "base-home/SKILL.md").is_file())
+        self.assertIn(str(self.base), (self.link / "base-home/SKILL.md").read_text())
+        e = self.reg()["agents-skills"]
+        self.assertEqual((e["mode"], e.get("link"), e["from"]), ("adopted", True, "~/.agents/skills"))
+        self.ok("connect")                                                     # twice: same result
+        self.assertTrue(self.link.is_symlink())
+        self.ok("watch", "--once", "--no-commit")                              # never mirrored back (no circle)
+        self.assertFalse((self.dest / "MIRROR").exists())
+        self.assertEqual(self.reg()["agents-skills"]["mode"], "adopted")
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertNotRegex(out, r"ERROR.*agents/skills")
+        self.ok("disconnect")
+        self.assertFalse(os.path.lexists(self.link))
+        self.assertFalse(self.dest.exists())
+        self.assertNotIn("agents-skills", self.reg())
+        after = {k: v for k, v in ltree(self.home).items()}
+        self.assertEqual({k for k in after if k.startswith(".agents")}, {k for k in home0 if k.startswith(".agents")})
+
+    def test_an_old_folder_with_only_connects_copies_becomes_the_link(self):
+        self.ok("connect")
+        os.unlink(self.link)                                                   # how older versions left it
+        os.rename(self.dest, self.link)
+        k = json.loads((self.base / ".kits.json").read_text())
+        k["kits"]["base-folder"]["connect"].pop("skills_link", None)
+        (self.base / ".kits.json").write_text(json.dumps(k))
+        (self.base / "engines.json").unlink()
+        self.write(self.base, "engines/agents-skills/MIRROR", "MIRROR: old copy\n")  # and watch's mirror of it
+        (self.base / "engines.json").write_text(json.dumps(
+            {"engines": {"agents-skills": {"mode": "mirror", "src": "~/.agents/skills", "since": "2026-11-12"}}}))
+        self.ok("connect")
+        self.assertTrue(self.link.is_symlink())
+        self.assertTrue((self.dest / "base-home/SKILL.md").is_file())
+        self.assertFalse((self.dest / "MIRROR").exists())
+        self.assertEqual(self.reg()["agents-skills"]["mode"], "adopted")
+        self.ok("disconnect")
+        self.assertFalse(os.path.lexists(self.link))
+
+    def test_a_folder_with_other_files_is_reported_and_left(self):
+        self.write(self.home, ".agents/skills/mine/SKILL.md", "---\nname: mine\n---\nmine\n")
+        r = self.ok("connect")
+        self.assertFalse(self.link.is_symlink())
+        self.assertIn("~/.agents/skills", r.stdout)
+        self.assertIn("mine/SKILL.md", r.stdout)
+        self.assertTrue((self.link / "base-home/SKILL.md").is_file(), "the copies are still written there")
+        self.assertTrue((self.link / "mine/SKILL.md").is_file())
+        self.assertNotIn("agents-skills", self.reg())
+
+    def test_doctor_errors_when_the_skills_link_is_replaced(self):
+        self.ok("connect")
+        os.unlink(self.link)
+        self.link.mkdir()
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertRegex(out, r"ERROR.*~/\.agents/skills.*real folder.*brain\.py connect")

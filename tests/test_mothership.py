@@ -870,6 +870,7 @@ class UpdateUninstallTests(Base):
         self.ms("--yes")
         oc = self.home / ".qwen"
         oc.mkdir()
+        (oc / "settings.json").write_text("{}\n")      # its own file: a bare folder is not proof (1.6.6)
         self.py(self.base / "tools/brain.py", "watch", "--once", "--base", self.base, "--no-commit")
         self.assertIn("base-folder:start", (oc / "QWEN.md").read_text())       # a tool installed later is connected
         # Skeleton Base re-runs Frugal-Bridge's setup by itself; it finds the kit through global.json "kit"
@@ -966,12 +967,12 @@ class FrugalGlobalRefreshTests(Base):
 
     def test_update_respects_a_newer_own_checkout(self):
         self.ms("--yes")
-        mine = self.kit_copy("frugal-mine", "2.43", "MY CHECKOUT")
+        mine = self.kit_copy("frugal-mine", "9.0", "MY CHECKOUT")    # newer than any vendored release
         self.py(mine / "kit" / "setup.py", "install", "--global")
         self.adopt_global(mine)
         out = self.ms("update", "--yes")
         self.assertIn("checks: all OK", out)
-        self.assertIn(f"your own kit {mine}, release 2.43", out)
+        self.assertIn(f"your own kit {mine}, release 9.0", out)
         self.assertIn(b"MY CHECKOUT", (self.home / ".frugal-bridge" / "frugal_hook.py").read_bytes())
         self.assertEqual(json.loads((self.home / ".frugal-bridge" / "global.json").read_text())["kit"], str(mine))
 
@@ -1106,6 +1107,7 @@ def full_tree(d, skip=()):
 
 USER_RULES = "# My own rules\n\nAlways cite the page you used.\n\n"
 # what the products may remove or rewrite in the base on uninstall (their own files); everything else must stay
+CONNECT_COPIES = {"engines.json", "engines", "engines/agents-skills"}   # made by connect inside the base
 PRODUCT_FILES = {".kits.json", ".mothership.json", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore",
                  ".claude/settings.json", ".gemini/settings.json", "maps/brain.html", ".brain/map.json",
                  ".brain/search.db", ".brain/collector.lock", ".brain/watch.lock", ".brain/kick"}
@@ -1214,7 +1216,8 @@ class KeepsYourDataTests(Base):
                 continue
             kit = [SB_VENDOR / rel, FB_VENDOR / "kit" / rel.replace(".claude/", "", 1)]
             same_kit = any(k.is_file() and hashlib.sha256(k.read_bytes()).hexdigest() == v[1] for k in kit)
-            self.assertTrue(rel in PRODUCT_FILES or same_kit or rel.startswith((".frugal-bridge/", ".brain/backups/connect-")),
+            self.assertTrue(rel in PRODUCT_FILES or rel in CONNECT_COPIES or same_kit
+                            or rel.startswith((".frugal-bridge/", ".brain/backups/connect-", "engines/agents-skills/")),
                             f"removed or changed and not a kit file: {rel}")
         hook = ".git/hooks/pre-commit"                    # the base guard init wrote: a kit file, removed
         self.assertIn(hook, before)
@@ -1333,7 +1336,10 @@ class KeepsYourDataTests(Base):
         self.py(self.base / "tools/brain.py", "disconnect", "--base", self.base,
                 FRUGAL_BRIDGE_KIT=str(self.home / ".local/share/the-mothership/payload/components/frugal-bridge"))
         t1 = full_tree(self.base)
-        self.assertEqual(sorted(k for k in set(t0) | set(t1) if t0.get(k) != t1.get(k)), [".kits.json"])
+        changed = sorted(k for k in set(t0) | set(t1) if t0.get(k) != t1.get(k))
+        # connect's own copies for ~/.agents/skills live in the base (1.6.6): disconnect removes them, nothing else
+        self.assertEqual([k for k in changed if k not in CONNECT_COPIES and not k.startswith("engines/agents-skills/")],
+                         [".kits.json"])
         self.assertTrue(mine)
 
 

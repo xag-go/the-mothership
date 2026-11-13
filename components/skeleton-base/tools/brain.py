@@ -97,7 +97,11 @@ Everything in the base (engines/<tool>/, projects/<slug>/; never in the base's g
                                sets the vault folder (only while the vault is empty)
   engine adopt TOOL [--force]  move a tool's config dir into engines/<tool>/ and point the tool's own setting
                                there (marked blocks in ~/.config/environment.d, ~/.profile, ~/.bashrc);
-                               refuses while a program uses the dir; engines.json records it
+                               refuses while a program uses the dir; engines.json records it. A tool with no
+                               such setting (claude-desktop = ~/.config/Claude) is adopted by a symlink: the dir
+                               moves into engines/<name>/, a link stays at the old place (checked, else undone),
+                               its secrets go to the vault; refuses while it runs or across filesystems
+  engine adopt --undo TOOL     the reverse of either kind
   engine release TOOL          the exact reverse (dir back, blocks out, old bytes restored)
   engine mirror TOOL|PATH [--name N] [--keep GLOB,...] | engine unmirror NAME | engine sync | engine list
                                a tool without such a setting: a read-only copy of its rules, agents, skills,
@@ -154,7 +158,7 @@ import time
 import urllib.parse
 
 VERSION = "1"
-RELEASE = "1.6.5"        # product release (CHANGELOG); recorded in .kits.json so installers never downgrade
+RELEASE = "1.6.6"        # product release (CHANGELOG); recorded in .kits.json so installers never downgrade
 SRC = pathlib.Path(__file__).resolve().parent.parent          # the skeleton this script came with
 START = f"<!-- base-folder:start v{VERSION} -->"
 END = "<!-- base-folder:end -->"
@@ -2005,7 +2009,10 @@ def tool_key_of(name):
     name = (name or "").strip()
     if name in TOOL_IDS:
         return TOOL_IDS[name]
-    return name if name in TOOL_HOMES or name in TOOL_IDS.values() else None
+    link = {t["id"]: k for k, t in TOOLS.items() if t.get("adopt") == "link"}     # tools adopted by a symlink
+    if name in link:
+        return link[name]
+    return name if name in TOOL_HOMES or name in TOOL_IDS.values() or name in link.values() else None
 
 
 def registered_dirs(home, notes=None):
@@ -4295,7 +4302,7 @@ def same_path(x, v):
 #   status   "legacy" / "discontinued" (detected, never newly connected) / "app".
 #   access, mcp, memory, hooks: what connect does or why it cannot (shown by `connect --print` and the README).
 TOOLS = {t["key"]: t for t in (
-    dict(key=".claude", name="Claude Code", bins=("claude",), marks=(".claude",),
+    dict(key=".claude", name="Claude Code", bins=("claude",), marks=(".claude.json",),
          rules=((".claude/CLAUDE.md", "create"),),
          access="`permissions.additionalDirectories` + `Bash(python3 BASE/tools/brain.py *)` in "
                 "`~/.claude/settings.json`",
@@ -4306,7 +4313,7 @@ TOOLS = {t["key"]: t for t in (
                      "its `skills/`",
          src="code.claude.com/docs/en/memory, /permissions, /mcp, /hooks"),
     dict(key=".codex", name="Codex (CLI, IDE and the ChatGPT desktop app, one Codex host)", bins=("codex",),
-         marks=(".codex",), rules=((".codex/AGENTS.override.md", "existing"), (".codex/AGENTS.md", "create")),
+         marks=(".codex/auth.json", ".codex/config.toml"), rules=((".codex/AGENTS.override.md", "existing"), (".codex/AGENTS.md", "create")),
          pick="first", cap=(32768, "bytes", "Codex loads at most 32 KiB of AGENTS.md text, this file and the "
                                             "project's together (project_doc_max_bytes)"),
          skills=True, access="`[sandbox_workspace_write] writable_roots` in `~/.codex/config.toml`",
@@ -4322,14 +4329,14 @@ TOOLS = {t["key"]: t for t in (
          note="`~/.gemini` alone is not proof (Antigravity makes it too): the `gemini` program or its settings "
               "file must be there",
          src="github.com/google-gemini/gemini-cli docs/cli/gemini-md.md, docs/reference/configuration.md"),
-    dict(key=".qwen", name="Qwen Code", bins=("qwen",), marks=(".qwen",), rules=((".qwen/QWEN.md", "create"),),
+    dict(key=".qwen", name="Qwen Code", bins=("qwen",), marks=(".qwen/oauth_creds.json", ".qwen/settings.json"), rules=((".qwen/QWEN.md", "create"),),
          skills=True, access="`context.includeDirectories` in `~/.qwen/settings.json`",
          mcp="`mcpServers` in `~/.qwen/settings.json`",
          memory="`~/.qwen/QWEN.md`, auto-memory `~/.qwen/projects/*/memory/**/*.md`, `~/.qwen/memories/**/*.md`",
          note="the block goes in QWEN.md, not `~/.qwen/rules/` (rules files lose HTML comments, so the marked "
               "block could not be found again)",
          src="github.com/QwenLM/qwen-code docs/users/features/memory.md, rules.md, configuration/settings.md"),
-    dict(key=".config/opencode", name="opencode (v1 and v2)", bins=("opencode",), marks=(".config/opencode",),
+    dict(key=".config/opencode", name="opencode (v1 and v2)", bins=("opencode",), marks=(".config/opencode/opencode.json", ".config/opencode/opencode.jsonc"),
          rules=((".config/opencode/AGENTS.md", "create"),), skills=True,
          access="v2: an `external_directory` allow rule in `permissions` (only where it has rules: v2 lets agents "
                 "out by default); v1: `permission.external_directory` (its default asks)",
@@ -4359,14 +4366,14 @@ TOOLS = {t["key"]: t for t in (
          memory="server-side (GitHub): not a local file, not collected",
          hooks="runs a repo's `.claude/settings*.json` hooks (ours are safe to run twice)",
          src="docs.github.com copilot-cli (custom instructions, config dir reference, hooks)"),
-    dict(key=".openclaw", name="OpenClaw", bins=("openclaw",), marks=(".openclaw",),
+    dict(key=".openclaw", name="OpenClaw", bins=("openclaw",), marks=(".openclaw/workspace/AGENTS.md",),
          rules=((".openclaw/workspace/AGENTS.md", "existing"),),
          cap=(20000, "chars", "OpenClaw injects at most 20,000 characters per bootstrap file"), skills=True,
          access="no wall (its sandbox is off by default)",
          mcp="needs you: `openclaw mcp` (config format not verified)",
          memory="`workspace/MEMORY.md`, `USER.md`, `DREAMS.md`, `memory/*.md`",
          src="docs.openclaw.ai (agent workspace, memory, sandboxing)"),
-    dict(key=".hermes", name="Hermes Agent", bins=("hermes",), marks=(".hermes",),
+    dict(key=".hermes", name="Hermes Agent", bins=("hermes",), marks=(".hermes/config.yaml", ".hermes/SOUL.md"),
          rules=((".hermes/SOUL.md", "existing"), (".hermes/profiles/*/SOUL.md", "existing")),
          cap=(20000, "chars", "Hermes cuts a context file at 20,000 characters"),
          access="no wall (its file tools reach any path you can)",
@@ -4409,7 +4416,7 @@ TOOLS = {t["key"]: t for t in (
          memory="cloud (Agent Memory preview): not collected",
          note="the app's global rules are cloud settings: paste `connect --print` there by hand",
          src="docs.warp.dev (agents, warp-agent-cli, mcp)"),
-    dict(key=".cursor", name="Cursor (editor and cursor-agent)", bins=("cursor-agent",), marks=(".cursor",),
+    dict(key=".cursor", name="Cursor (editor and cursor-agent)", bins=("cursor-agent",), marks=(".cursor/cli-config.json", ".cursor/sandbox.json", ".cursor/mcp.json"),
          rules=(), skills=True,
          access="`additionalReadwritePaths` and `additionalReadPaths` in `~/.cursor/sandbox.json`; "
                 "`Read(BASE/**)`, `Write(BASE/**)` in `~/.cursor/cli-config.json` when it exists",
@@ -4429,16 +4436,16 @@ TOOLS = {t["key"]: t for t in (
          note="it loads `~/.claude/CLAUDE.md` unless `read_config_from.claude` is false: the block there reaches it",
          src="docs.devin.ai (cli/extensibility/rules, cli/reference/permissions, read-config-from, mcp)"),
     dict(key=".codeium/windsurf", name="Windsurf Cascade (legacy, now Devin Desktop)", bins=(),
-         marks=(".codeium/windsurf",), rules=((".codeium/windsurf/memories/global_rules.md", "create"),),
+         marks=(".codeium/windsurf/mcp_config.json",), rules=((".codeium/windsurf/memories/global_rules.md", "create"),),
          status="legacy", access="no file setting", mcp="-", memory="internal, not collected",
          src="docs.devin.ai/desktop/cascade (Cascade is the legacy agent)"),
-    dict(key=".kiro", name="Kiro (IDE and kiro-cli)", bins=("kiro-cli",), marks=(".kiro",),
+    dict(key=".kiro", name="Kiro (IDE and kiro-cli)", bins=("kiro-cli",), marks=(".kiro/settings/mcp.json", ".kiro/settings/permissions.yaml"),
          rules=((".kiro/steering/skeleton-base.md", "create"),),
          access="`fs_read` and `fs_write` allow rules in `~/.kiro/settings/permissions.yaml`",
          mcp="`mcpServers` in `~/.kiro/settings/mcp.json`", memory="Kiro Memory is opaque: not collected",
          skills_note="reads `~/.kiro/skills` (not `~/.agents/skills`)",
          src="kiro.dev/docs (steering, permissions, mcp/configuration, memory)"),
-    dict(key=".cline", name="Cline (VS Code, JetBrains, CLI)", bins=("cline",), marks=(".cline", "Documents/Cline"),
+    dict(key=".cline", name="Cline (VS Code, JetBrains, CLI)", bins=("cline",), marks=(".cline/data/settings/cline_mcp_settings.json", ".cline/data/settings/global-settings.json"),
          rules=(("Documents/Cline/Rules/skeleton-base.md", "create"),), group=".agents/AGENTS.md", skills=True,
          access="needs you: only the all-or-nothing \"Read all files\" / \"Edit all files\" auto-approve, or add "
                 "the base as a workspace folder",
@@ -4447,7 +4454,7 @@ TOOLS = {t["key"]: t for t in (
     dict(key=".roo", name="Roo Code (discontinued 2026-05-15)", bins=(), marks=(".roo",), rules=(),
          status="discontinued", access="-", mcp="-", memory="-",
          src="github.com/RooCodeInc/Roo-Code-Docs docs/sunset.md"),
-    dict(key=".continue", name="Continue (extension and cn)", bins=("cn",), marks=(".continue",),
+    dict(key=".continue", name="Continue (extension and cn)", bins=("cn",), marks=(".continue/permissions.yaml", ".continue/config.yaml"),
          rules=((".continue/rules/skeleton-base.md", "create"),),
          access="`Read(BASE/**)`, `Write(BASE/**)` in `allow` of `~/.continue/permissions.yaml` (cn)",
          mcp="needs you: `mcpServers` in its config.yaml (a user-level block folder is not documented)",
@@ -4459,13 +4466,22 @@ TOOLS = {t["key"]: t for t in (
          access="needs you: no extra-folder setting (add the base as a project folder)",
          mcp="`context_servers` in `~/.config/zed/settings.json` (comments kept)", memory="none",
          src="zed.dev/docs/ai (instructions, mcp, tools, skills)"),
-    dict(key=".junie", name="JetBrains Junie (CLI and IDE)", bins=("junie",), marks=(".junie",),
+    dict(key=".junie", name="JetBrains Junie (CLI and IDE)", bins=("junie",), marks=(".junie/allowlist.json", ".junie/mcp/mcp.json"),
          rules=((".junie/AGENTS.md", "create"),), skills=True,
          access="`readOutsideProject` and `fileEditing` allow rules in `~/.junie/allowlist.json`",
          mcp="`mcpServers` in `~/.junie/mcp/mcp.json`", memory="none native",
          src="junie.jetbrains.com/docs (guidelines-and-memory, action-allowlist, junie-cli-mcp-configuration)"),
-    dict(key=".config/Claude", name="Claude app (desktop)", bins=(),
-         marks=(".config/Claude/claude_desktop_config.json",), dir=".config/Claude", rules=(), status="app",
+    dict(key=".config/Claude", name="Claude app (desktop)", bins=(), id="claude-desktop",
+         marks=(".config/Claude/config.json", ".config/Claude/Local State"), dir=".config/Claude", rules=(),
+         status="app",
+         # no setting moves its folder: `engine adopt claude-desktop` moves it into engines/ and leaves a link
+         adopt="link", locks=("SingletonLock",),          # Electron: a link "<host>-<pid>" while the app runs
+         vault=("Cookies", "Cookies-journal", "buddy-tokens.json", "ant-did", "ant-device-registry.json",
+                "Trust Tokens*", "claude_desktop_config.json", "config.json",   # MCP env keys; oauth:tokenCache
+                "Local Storage/", "Session Storage/", "IndexedDB/", "WebStorage/"),
+         heavy=("vm_bundles/", "claude-code-vm/", "claude-code/", "Cache/", "Code Cache/", "GPUCache/",
+                "DawnGraphiteCache/", "DawnWebGPUCache/", "Crashpad/", "logs/", "sentry/", "blob_storage/",
+                "fcache", "Shared Dictionary/"),     # app-managed binaries, caches, crash dumps: regenerated
          access="through the MCP server: reads the base, saves notes to `raw/inbox/mcp/`",
          mcp="`mcpServers` in `~/.config/Claude/claude_desktop_config.json`",
          memory="server-side (your account): not collected",
@@ -4627,7 +4643,8 @@ class Connector:
                "pointer": dict(prev.get("pointer", {})), "access": dict(prev.get("access", {})),
                "skills": dict(prev.get("skills", {})), "mcp": bool(mcp or prev.get("mcp")),
                "dirs": {k: list(v) for k, v in (prev.get("dirs") or {}).items()},
-               "dir_hooks": dict(prev.get("dir_hooks", {})), "registry": dict(prev.get("registry", {}))}
+               "dir_hooks": dict(prev.get("dir_hooks", {})), "registry": dict(prev.get("registry", {})),
+               **{x: prev[x] for x in ("skills_link", "skills_kept") if x in prev}}
 
         never = [x.removeprefix("~/") for x in watch_cfg(self.base).get("never", []) if isinstance(x, str)]
         skip = lambda r: any(fnmatch.fnmatchcase(r, g) or r.startswith(g.rstrip("/") + "/") for g in never)
@@ -4642,9 +4659,10 @@ class Connector:
             if self.block_into(rec, r, p["how"] == "create"):
                 for key in p["tools"]:
                     wrote.setdefault(key, []).append(r)
-        for r in list(rec["blocks"]):                   # a tool not found now: its block is kept current only
-            if r not in plan and find_block(read(self.home / r) or ""):
-                self.block_into(rec, r, False)
+        owned = [pat for t in TOOLS.values() for pat, _ in t["rules"]] + list(GROUPS)
+        for r in list(rec["blocks"]):                   # a tool not installed now: our block goes (archived first)
+            if r not in plan and not skip(r) and any(fnmatch.fnmatchcase(r, pat) for pat in owned):
+                self.drop_block(rec, r)
         self.check_caps(plan)
         if ".aider.conf.yml" in found and "\n" not in str(self.base):
             self.units(rec["pointer"], {POINTER_MD: pointer_block(self.base) + "\n"})
@@ -4680,7 +4698,7 @@ class Connector:
                                        "why": "looks like an AI tool (it has a memory store, now watched) but no "
                                               "rules file we know: add the pointer in its settings by hand"}
 
-        if (self.home / self.L(".claude")).is_dir():
+        if ".claude" in found and (self.home / self.L(".claude")).is_dir():
             self.merge_hooks(rec, kick)
         for key, d in extra:                            # every extra dir of a tool: same block, settings, hooks
             self.connect_extra(rec, key, d, kick, found)
@@ -4698,6 +4716,7 @@ class Connector:
         if "\n" not in str(self.base):                 # the base's own pointer file: any kit finds the base there
             self.units(rec["pointer"], {POINTER_FILE: f"{self.base}\n"})
         me["connect"] = {key: v for key, v in rec.items() if v}
+        self.record_base_files(me)
         self.save_kits(k)
         before = set(prev.get("blocks") or {})
         self.frugal_take_over([r for r in rec["blocks"] if r not in before] if before else [],
@@ -4759,8 +4778,8 @@ class Connector:
     # -- which tools are here, and which rules file each one gets (loaded ONCE per tool)
     def created_files(self, rec):
         """Files our own connect created: never taken as proof that a tool is installed."""
-        mine = {r for r, b in rec["blocks"].items() if b.get("created")}
-        mine |= {r for r, a in rec["access"].items() if a.get("created")}
+        mine = {r for r, b in rec.get("blocks", {}).items() if b.get("created")}
+        mine |= {r for r, a in rec.get("access", {}).items() if a.get("created")}
         for store in ("timer", "watch", "pointer", "skills", "registry"):
             mine |= {r for r, t in rec.get(store, {}).items() if not t.get("previous")}
         return mine
@@ -4835,14 +4854,16 @@ class Connector:
             return
         new = (t[:span[0]] + b["previous"] + t[span[1]:]) if b.get("mode") == "replaced" else \
             Installer.strip_block(t, b.get("mode", "append"))[0]
-        if b.get("created") and not new:
+        arch = self.backup(r)                           # what we delete or change is archived first
+        if not new.strip():
             (self.home / r).unlink()
             for d in sorted(b.get("dirs", []), key=lambda x: -x.count("/")):
                 if (self.home / d).is_dir() and not any((self.home / d).iterdir()):
                     (self.home / d).rmdir()
         else:
             write(self.home / r, new)
-        self.log.append(f"{tool_tilde(r)}: base block removed (the tool gets it from another file now, loaded once)")
+        self.log.append(f"{tool_tilde(r)}: base block removed (archived in {arch or 'nothing to archive'}; "
+                        "the tool gets it from another file now, loaded once, or is not installed)")
 
     def check_caps(self, plan):
         for r, p in plan.items():
@@ -5188,7 +5209,111 @@ class Connector:
             "knowledge.\n---\n\n" + pointer_body(self.base) + "\n")
         return out
 
+    def link_skills(self, rec):
+        """~/.agents/skills is a link to BASE/engines/agents-skills (adopted, never a mirror): the copies connect
+        writes live in the base. A folder there becomes the link only when it holds nothing but connect's own
+        copies (else it is reported and left as it is)."""
+        src, dest = self.home / SKILLS_DIR, self.base / "engines" / SKILLS_ENGINE
+        mine = rec.get("skills", {})
+        if src.is_symlink():
+            if os.path.realpath(src) == os.path.realpath(dest):
+                dest.mkdir(parents=True, exist_ok=True)
+                rec.setdefault("skills_link", {"dirs": []})
+                link_register(self.base, SKILLS_ENGINE, SKILLS_ENGINE, src, self.home, {"by": "connect"})
+            return
+        if src.is_dir():
+            other = []
+            for dp, dns, fns in os.walk(src):
+                for n in sorted(fns) + [x for x in dns if os.path.islink(os.path.join(dp, x))]:
+                    p = pathlib.Path(dp) / n
+                    r = path_key(p, self.home)
+                    t = mine.get(r)
+                    if p.is_symlink() or not p.is_file() or not t or sha(p.read_bytes()) != t.get("sha"):
+                        other.append(p.relative_to(src).as_posix())
+            if other:
+                note = sorted(other)
+                if rec.get("skills_kept") != note:
+                    self.log.append(f"kept ~/{SKILLS_DIR} as a folder (not linked into the base): it holds files "
+                                    "connect did not write: " + ", ".join(note[:8]) + (" ..." if len(note) > 8 else "")
+                                    + f". Move them (e.g. into the base's skills/), then run connect again")
+                rec["skills_kept"] = note
+                return
+            rec.pop("skills_kept", None)
+            e = reg_load(self.base, ENGINES_REG).get("engines", {}).get(SKILLS_ENGINE)
+            if dest.is_dir() and not dest.is_symlink() and isinstance(e, dict) and e.get("link"):
+                shutil.rmtree(src)                    # only connect's copies: they are written again in the base
+                os.symlink(str(dest), str(src))
+                self.log.append(f"~/{SKILLS_DIR} is a link to {dest} again")
+            else:
+                try:
+                    self.log += link_move(self.base, src, SKILLS_ENGINE, self.home, what="connect")
+                except SystemExit as x:
+                    self.log.append(f"kept ~/{SKILLS_DIR} as a folder: {x}")
+                    return
+            rec.setdefault("skills_link", {"dirs": []})
+        else:
+            made = self.missing_dirs(SKILLS_DIR + "/x")[1:]     # ~/.agents (when connect makes it)
+            e = reg_load(self.base, ENGINES_REG).get("engines", {}).get(SKILLS_ENGINE)
+            if os.path.lexists(dest) and not (isinstance(e, dict) and e.get("link")):
+                if not (isinstance(e, dict) and e.get("mode") == "mirror" and (dest / "MIRROR").is_file()):
+                    self.log.append(f"{dest} exists and is not connect's: ~/{SKILLS_DIR} is a plain folder")
+                    return
+                shutil.rmtree(dest)                   # watch's old mirror of it: the real folder replaces it
+            dest.mkdir(parents=True, exist_ok=True)
+            src.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(str(dest), str(src))
+            self.log.append(f"~/{SKILLS_DIR} -> {dest} (the base's skills, read by most tools)")
+            rec["skills_link"] = {"dirs": made}
+        link_register(self.base, SKILLS_ENGINE, SKILLS_ENGINE, src, self.home, {"by": "connect"})
+        self.log += link_drop_mirrors(self.base, src, self.home, SKILLS_ENGINE)
+
+    def record_base_files(self, me, gone=False):
+        """The files connect itself made in the base (the skills copies in engines/agents-skills, an engines.json
+        that holds only their entry) are listed with their hash in the kit's "created" record, like the kit's own
+        files: an installer that guards your data then knows they are ours, not yours."""
+        created = me.setdefault("created", {})
+        for r in [r for r in created if r.startswith(f"engines/{SKILLS_ENGINE}/") or r == ENGINES_REG]:
+            created.pop(r)
+        dest = self.base / "engines" / SKILLS_ENGINE
+        reg = reg_load(self.base, ENGINES_REG)
+        if gone or not (reg.get("engines", {}).get(SKILLS_ENGINE) or {}).get("link") or dest.is_symlink():
+            return
+        for dp, dns, fns in os.walk(dest):
+            for f in fns:
+                fp = pathlib.Path(dp) / f
+                if fp.is_file() and not fp.is_symlink():
+                    created[fp.relative_to(self.base).as_posix()] = sha(fp.read_bytes())
+        if set(reg) == {"engines"} and set(reg["engines"]) == {SKILLS_ENGINE}:
+            created[ENGINES_REG] = sha((self.base / ENGINES_REG).read_bytes())
+
+    def unlink_skills(self, rec):
+        """disconnect: the link goes; what is left in engines/agents-skills (not ours) comes back as the folder."""
+        sl = rec.get("skills_link")
+        if sl is None:
+            return set()
+        src, dest = self.home / SKILLS_DIR, self.base / "engines" / SKILLS_ENGINE
+        if src.is_symlink() and os.path.realpath(src) == os.path.realpath(dest):
+            os.unlink(src)
+            for dp, dns, fns in os.walk(dest, topdown=False):
+                if not os.listdir(dp):
+                    os.rmdir(dp)
+            if dest.is_dir():
+                os.rename(dest, src); self.log.append(f"~/{SKILLS_DIR}: a folder again (it held your files)")
+            else:
+                self.log.append(f"removed the link ~/{SKILLS_DIR}")
+        reg = reg_load(self.base, ENGINES_REG)
+        if (reg.get("engines", {}).get(SKILLS_ENGINE) or {}).get("link"):
+            reg["engines"].pop(SKILLS_ENGINE)
+            if not reg["engines"]:
+                reg.pop("engines")
+            if reg:
+                reg_save(self.base, ENGINES_REG, reg)
+            else:
+                (self.base / ENGINES_REG).unlink()
+        return set(sl.get("dirs", []))
+
     def install_skills(self, rec):
+        self.link_skills(rec)
         store = rec.setdefault("skills", {})
         for r, text in self.skill_texts().items():
             cur, t = read(self.home / r), store.get(r)
@@ -5627,12 +5752,17 @@ class Connector:
                 self.log.append(f"kept {tool_tilde(r)} (changed since connect)")
         for d in sorted(dirs, key=lambda x: -x.count("/")):
             d = self.home / d
-            if d.is_dir() and not any(d.iterdir()):
+            if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
+                d.rmdir()
+        for d in sorted(self.unlink_skills(rec) | {x for x in dirs if x == ".agents"}, key=lambda x: -x.count("/")):
+            d = self.home / d
+            if d.is_dir() and not d.is_symlink() and not any(d.iterdir()):
                 d.rmdir()
         if rec.get("timer"):
             tt = f" {TIDY_UNIT}.timer" if any(TIDY_UNIT in r for r in rec["timer"]) else ""
             self.log.append(f"if the timers were enabled: systemctl --user disable --now {UNIT}.timer{tt}")
         del me["connect"]
+        self.record_base_files(me, gone=True)
         self.save_kits(k)
         self.frugal_give_back()
         return self.log
@@ -5886,6 +6016,15 @@ def autoconnect(base):
     for e in c.auto_extra:
         if e["root"] not in have:
             extra.append(e); have.add(e["root"]); log.append(f"watching {e['root']} (source {e['source']})")
+    seen = cfg.get("seen_tools")                    # adopt what became installed since the last run, never on the
+    if seen is not None:                            # first run (existing installs stay where they are)
+        for key in sorted(set(c.tools) - set(seen)):
+            if engine_var(key) and not in_dir(tool_root(key, home_dir())[0], base):
+                try:
+                    log += engine_adopt(base, key)
+                except SystemExit as e:
+                    log.append(f"not adopted {TOOLS[key]['name']} (left where it is): {e}")
+    cfg["seen_tools"] = sorted(set(seen or []) | set(c.tools))
     cfg["tools"], cfg["extra"] = tools, extra
     if not cfg["extra"]:
         cfg.pop("extra")
@@ -6916,7 +7055,12 @@ def check_public(target, words_file):
 BASE_SKIP = ("engines", "projects", "data", "apps", "runs", "scratch", "backups", "ops")
 ENGINES_REG, PROJECTS_REG, MOVES_LOG = "engines.json", "projects.json", ".brain/moves.json"
 ENGINE_NAMES = {".claude": "claude", ".codex": "codex", ".hermes": "hermes", ".openclaw": "openclaw",
-                ".copilot": "copilot"}
+                ".copilot": "copilot", **{k: t["id"] for k, t in TOOLS.items() if t.get("adopt") == "link"}}
+SKILLS_ENGINE = "agents-skills"             # ~/.agents/skills -> engines/agents-skills (connect writes it there)
+# per tool folder under engines/ (exact name), from the TOOLS rows: secret names at its top ("x/" = a whole folder,
+# vaulted as one link) and heavy regenerated sub-folders that never go to git, Syncthing or the vault
+ENGINE_VAULT = {t["id"]: tuple(t["vault"]) for t in TOOLS.values() if t.get("vault")}
+ENGINE_HEAVY = {t["id"]: tuple(t["heavy"]) for t in TOOLS.values() if t.get("heavy")}
 ADOPT_WARN = {".hermes": "Hermes keeps absolute paths to its home in its launcher and venv (bin/hermes, "
                          "pyvenv.cfg): it must be re-bootstrapped at the new home; rehearse on a copy first"}
 ENV_START, ENV_END = "# skeleton-base engines:start", "# skeleton-base engines:end"
@@ -7033,6 +7177,7 @@ def gitignore_layout(shares=None):
     out += [f"/engines/**/{g}" for g in ENGINE_DENY_FILES]
     out += [f"/engines/**/{d}/" for d in ENGINE_DENY_DIRS]
     out += [f"/engines/*/{g}" for g in ENGINE_DENY_TOP]
+    out += [f"/engines/{n}/{g}" for n, pats in sorted(ENGINE_HEAVY.items()) for g in pats]   # regenerated, heavy
     if (shares or {}).get(VAULTED):
         out.append("# vault links (generated: brain.py vault): the secrets live outside the base")
         out += ["/" + _st_escape(x) for x in shares[VAULTED]]
@@ -7058,6 +7203,7 @@ def stignore_layout(shares=None):
     out += [f"/engines/**/{g}" for g in ENGINE_DENY_FILES]
     out += [f"/engines/**/{d}" for d in ENGINE_DENY_DIRS]
     out += [f"/engines/*/{g}" for g in ENGINE_DENY_TOP]
+    out += [f"/engines/{n}/{g.rstrip('/')}" for n, pats in sorted(ENGINE_HEAVY.items()) for g in pats]  # even sync all
     out.append("!/engines/README.md")
     for k, pats in ENGINE_SAFE.items():
         out += [f"!/engines/{k}/{g.rstrip('/')}" for g in pats]
@@ -7743,17 +7889,26 @@ def vault_secrets(d):
     `api_token.txt` only at D's top; every file of a login folder such as mcp-tokens/); sessions, caches and code
     folders skipped."""
     d, out = pathlib.Path(d), []
+    heavy = {g.rstrip("/") for g in ENGINE_HEAVY.get(d.name, ())}
+    own = ENGINE_VAULT.get(d.name, ())                # the tool row's own secret names (top of its folder)
     for dp, dns, fns in os.walk(d):
         dns[:] = sorted(x for x in dns if x not in VAULT_SKIP_DIRS and not os.path.islink(os.path.join(dp, x))
                         and not os.path.lexists(os.path.join(dp, x, ".git"))      # code checkouts are not logins
-                        and not (dp == str(d) and x in VAULT_SAFE_TOP))
+                        and not (dp == str(d) and (x in VAULT_SAFE_TOP or x in heavy)))
         rel_parts = pathlib.Path(dp).relative_to(d).parts
-        sec = any(x in VAULT_SECRET_DIRS for x in rel_parts)
+        sec = any(x in VAULT_SECRET_DIRS for x in rel_parts) or bool(rel_parts) and vault_own(rel_parts[0], own, True)
         for f in fns:
             fp = pathlib.Path(dp) / f
-            if vault_secret_name(f, not rel_parts, sec) and not fp.is_symlink() and fp.is_file():
+            if (vault_secret_name(f, not rel_parts, sec) or not rel_parts and vault_own(f, own)) \
+                    and not fp.is_symlink() and fp.is_file():
                 out.append(fp)
     return sorted(out)
+
+
+def vault_own(name, pats, folder=False):
+    """NAME matches one of a tool row's own secret names (PATS; "x/" = a folder)."""
+    return not any(fnmatch.fnmatchcase(name, g) for g in VAULT_NOT) and \
+        any(g.endswith("/") == folder and fnmatch.fnmatchcase(name, g.rstrip("/")) for g in pats)
 
 
 def vault_units(d):
@@ -7761,18 +7916,22 @@ def vault_units(d):
     e.g. Claude's backups/ of .claude.json that it rotates, or mcp-tokens/) moves as ONE folder link, so new files the
     tool writes there land in the vault too; every other secret file moves alone. [(path, path below D)]"""
     d, files = pathlib.Path(d), vault_secrets(d)
+    own = ENGINE_VAULT.get(d.name, ())
+    whole = [d / x for x in sorted(os.listdir(d)) if vault_own(x, own, True) and (d / x).is_dir()
+             and not (d / x).is_symlink()] if own else []      # a tool row's secret folder moves as ONE link
+    out = [(x, x.name) for x in whole]
+    files = [f for f in files if not any(in_dir(f, x) for x in whole)]
     by = {}
     for f in files:
         by.setdefault(f.parent, []).append(f)
-    out = []
     for par, fs in sorted(by.items()):
         try:
             names = sorted(os.listdir(par))
         except OSError:
             names = []
-        whole = par != d and len(names) == len(fs) and all(not os.path.islink(par / n) and (par / n).is_file()
-                                                          for n in names)
-        out += [(par, par.relative_to(d).as_posix())] if whole else [(f, f.relative_to(d).as_posix()) for f in fs]
+        one = par != d and len(names) == len(fs) and all(not os.path.islink(par / n) and (par / n).is_file()
+                                                        for n in names)
+        out += [(par, par.relative_to(d).as_posix())] if one else [(f, f.relative_to(d).as_posix()) for f in fs]
     return sorted(out)
 
 
@@ -8571,9 +8730,16 @@ def reconnect(base, log):
     return log
 
 
-def engine_adopt(base, tool, force=False):
+def engine_adopt(base, tool, force=False, undo=False):
     base, home, log = pathlib.Path(base).resolve(), home_dir(), []
     key = tool_key_of(tool)
+    if undo:
+        e = reg_load(base, ENGINES_REG).get("engines", {}).get(ENGINE_NAMES.get(key, tool) if key else tool)
+        if isinstance(e, dict) and e.get("env"):
+            return engine_release(base, tool, force)
+        return engine_unadopt_link(base, ENGINE_NAMES.get(key, tool) if key else tool, force)
+    if key in TOOLS and TOOLS[key].get("adopt") == "link":
+        return engine_adopt_link(base, key, force)
     var = engine_var(key) if key else None
     if not var:
         names = ", ".join(sorted(k for k, v in TOOL_IDS.items() if engine_var(v)))
@@ -8635,6 +8801,8 @@ def engine_release(base, tool, force=False):
     e = reg.get("engines", {}).get(name)
     if not e or e.get("mode") != "adopted":
         raise SystemExit(f"engine release: {tool} was not adopted into this base")
+    if e.get("link") and not e.get("env"):
+        return engine_unadopt_link(base, name, force)
     dest, back = base / "engines" / name, pathlib.Path(expand(e["from"], home))
     if back.exists():
         raise SystemExit(f"engine release: {back} exists again (a launcher without {e['env']} made a fresh one?): "
@@ -8664,6 +8832,227 @@ def engine_release(base, tool, force=False):
     if rekey_connect(base, pairs):
         reconnect(base, log)
     log.append(f"unset {e['env']} in running shells (`unset {e['env']}`) and restart sessions and services")
+    return log
+
+
+# -- adopt by symlink: a tool with no setting that moves its folder (the Claude app, ~/.agents/skills). The folder
+# moves into engines/NAME (one rename on the same filesystem) and a symlink stays at the old place.
+def lock_holders(d, names):
+    """Why the tool that owns folder D looks running: each lock/pid file NAMES (an Electron SingletonLock is a
+    link "<host>-<pid>"; a pid file holds the pid) whose process is alive on this host. A lock of another host or
+    one we cannot read counts as running (it cannot be checked)."""
+    host, out = os.uname().nodename, []
+    for n in names:
+        p = pathlib.Path(d) / n
+        if not os.path.lexists(p):
+            continue
+        try:
+            txt = (os.readlink(p) if p.is_symlink() else p.read_text(errors="replace")[:200]).strip()
+        except OSError as e:
+            out.append(f"{n}: cannot read it ({e.strerror}): cannot tell whether it runs"); continue
+        m = re.fullmatch(r"(?:(.+)-)?(\d+)", txt)
+        if not m:
+            out.append(f"{n}: not a pid ({txt[:40]!r}): cannot tell whether it runs"); continue
+        h, pid = m.group(1), int(m.group(2))
+        if h and h != host:
+            out.append(f"{n}: held by host {h} (pid {pid}): cannot check from here"); continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue                                  # a stale lock: the app is not running
+        except PermissionError:
+            pass
+        out.append(f"{n}: pid {pid} is running")
+    return out
+
+
+def tree_bytes(d):
+    n = 0
+    for dp, dns, fns in os.walk(d):
+        for f in fns:
+            try:
+                n += os.lstat(os.path.join(dp, f)).st_size
+            except OSError:
+                pass
+    return n
+
+
+def size_text(n):
+    for u in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or u == "TB":
+            return f"{n:.0f} {u}" if u == "B" else f"{n:.1f} {u}"
+        n /= 1024
+
+
+def _link_check(src, dest, proof=()):
+    """Raise OSError unless SRC is a link that resolves to DEST and the files are readable through it."""
+    if not src.is_symlink() or os.path.realpath(src) != os.path.realpath(dest):
+        raise OSError(f"{src} does not resolve to {dest}")
+    names = sorted(os.listdir(src))
+    if names != sorted(os.listdir(dest)):
+        raise OSError(f"{src} does not list the same files as {dest}")
+    for n in list(proof) + names:
+        p = src / n
+        if p.is_file() and not p.is_symlink():
+            with open(p, "rb") as fh:
+                fh.read(1)
+
+
+def link_move(base, src, name, home, locks=(), force=False, proof=(), what="engine adopt"):
+    """The one mover for adopt by symlink: SRC (a real folder outside the base) -> BASE/engines/NAME, then a symlink
+    at SRC, then the check (the link resolves, files readable); any failure undoes it all. A mirror of SRC with the
+    same name is set aside first and comes back on failure. Refuses: SRC missing or a link, the tool running, the
+    target there, another filesystem (no partial copies). Returns the log."""
+    base, home = pathlib.Path(base).resolve(), pathlib.Path(home)
+    src, dest, log = pathlib.Path(src), pathlib.Path(base) / "engines" / name, []
+    if src.is_symlink():
+        if in_dir(src, base):
+            raise SystemExit(f"{what}: {home_rel(src, home)} is already a link into the base "
+                             f"({os.path.realpath(src)})")
+        raise SystemExit(f"{what}: {home_rel(src, home)} is a link to {os.readlink(src)}, not a folder to move")
+    if not src.is_dir():
+        raise SystemExit(f"{what}: {home_rel(src, home)} is not a folder (nothing to adopt)")
+    if in_dir(src, base):
+        raise SystemExit(f"{what}: {src} is inside the base already")
+    running = lock_holders(src, locks)
+    if running:
+        raise SystemExit(f"{what}: the tool is running ({'; '.join(running)}): quit it first (--force does not "
+                         "skip this)")
+    busy = procs_using(src)
+    if busy and not force:
+        raise SystemExit(f"{what}: these programs use {src} now (stop them first):\n" +
+                         "\n".join(f"  {pid} {cmd}" for pid, cmd in busy[:10]))
+    e = reg_load(base, ENGINES_REG).get("engines", {}).get(name)
+    mirror = isinstance(e, dict) and e.get("mode") == "mirror" and (dest / "MIRROR").is_file() \
+        and not dest.is_symlink()
+    if os.path.lexists(dest) and not mirror:
+        raise SystemExit(f"{what}: {dest} exists already: move it away first")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if os.stat(src).st_dev != os.stat(dest.parent).st_dev:
+        need, free = tree_bytes(src), shutil.disk_usage(dest.parent).free
+        raise SystemExit(f"{what}: {home_rel(src, home)} is on a different filesystem than the base: a move would "
+                         f"be a copy, which needs {size_text(need)} (free there: {size_text(free)}). Nothing was "
+                         "copied; move the base or the folder to one disk, then run again")
+    aside = dest.with_name(f".{name}.mirror-old") if mirror else None
+    if aside:
+        if os.path.lexists(aside):
+            shutil.rmtree(aside)
+        os.rename(dest, aside)
+    try:
+        os.rename(src, dest)
+    except OSError as e:
+        if aside:
+            os.rename(aside, dest)
+        raise SystemExit(f"{what}: could not move {src} -> {dest} ({e}); nothing changed")
+    try:
+        os.symlink(str(dest), str(src))
+        _link_check(src, dest, proof)
+    except OSError as e:
+        if src.is_symlink() and os.readlink(src) == str(dest):
+            os.unlink(src)
+        if not os.path.lexists(src):
+            os.rename(dest, src)
+        if aside:
+            os.rename(aside, dest)
+        raise SystemExit(f"{what}: the check failed ({e}); undone: {home_rel(src, home)} is back as it was")
+    if aside:
+        shutil.rmtree(aside, ignore_errors=True)
+    log.append(f"moved {home_rel(src, home)} -> {dest}; {home_rel(src, home)} is now a link to it")
+    moves = reg_load(base, MOVES_LOG)
+    moves.setdefault("moves", []).append({"kind": "engine", "name": name, "from": str(src), "to": str(dest),
+                                          "at": dt.datetime.now().isoformat(timespec="seconds")})
+    reg_save(base, MOVES_LOG, moves)
+    return log
+
+
+def link_register(base, name, tool, src, home, extra=None):
+    reg = reg_load(base, ENGINES_REG)
+    old = reg.get("engines", {}).get(name) or {}
+    new = {"tool": tool, "mode": "adopted", "link": True, "from": home_rel(src, home),
+           "since": old.get("since") or today(), **({"share": list(old["share"])} if old.get("share") else {}),
+           **(extra or {})}
+    if new != old:                                    # connect runs often: write only a change
+        reg.setdefault("engines", {})[name] = new
+        reg_save(base, ENGINES_REG, reg)
+
+
+def link_drop_mirrors(base, src, home, keep):
+    """F2: the mirrors of SRC go (folder and engines.json entry): the real folder is in the base now."""
+    log = []
+    for n, e in sorted(reg_load(base, ENGINES_REG).get("engines", {}).items()):
+        if n != keep and isinstance(e, dict) and e.get("mode") == "mirror" and e.get("src") and \
+                os.path.normpath(expand(e["src"], home)) == os.path.normpath(str(src)):
+            reg = reg_load(base, ENGINES_REG)
+            reg["engines"].pop(n)
+            reg_save(base, ENGINES_REG, reg)
+            d = pathlib.Path(base) / "engines" / n
+            if (d / "MIRROR").is_file() and not d.is_symlink():
+                shutil.rmtree(d, ignore_errors=True)
+            log.append(f"engines/{n}: mirror removed (engines/{keep} is the real folder now)")
+    return log
+
+
+def engine_adopt_link(base, key, force=False):
+    base, home = pathlib.Path(base).resolve(), home_dir()
+    t, name = TOOLS[key], ENGINE_NAMES[key]
+    src = home / key
+    refresh_ignore_blocks(base)                      # the heavy and secret lines are in place before anything moves
+    log = link_move(base, src, name, home, t.get("locks", ()), force,
+                    [m[len(key) + 1:] for m in t.get("marks", ()) if m.startswith(key + "/")])
+    link_register(base, name, t["id"], src, home)
+    log += link_drop_mirrors(base, src, home, name)
+    try:
+        log += engine_vault(base, name)
+    except SystemExit as e:
+        log.append(f"vault: {e} (run `brain.py engine vault {name}` once it is fixed)")
+    ch = refresh_ignore_blocks(base)
+    if ch:
+        log.append(f"updated {', '.join(ch)}")
+    log.append(f"{t['name']}: start it again; it finds its folder through the link. Undo: "
+               f"brain.py engine adopt --undo {t['id']}")
+    return log
+
+
+def engine_unadopt_link(base, name, force=False):
+    """The exact reverse of engine_adopt_link: secrets back from the vault, the link goes, the folder moves back."""
+    base, home = pathlib.Path(base).resolve(), home_dir()
+    e = reg_load(base, ENGINES_REG).get("engines", {}).get(name)
+    if not (isinstance(e, dict) and e.get("mode") == "adopted" and e.get("link")):
+        raise SystemExit(f"engine adopt --undo: engines/{name} was not adopted by a link")
+    src, dest = pathlib.Path(expand(e["from"], home)), base / "engines" / name
+    if not (src.is_symlink() and os.path.realpath(src) == os.path.realpath(dest)) or dest.is_symlink() \
+            or not dest.is_dir():
+        raise SystemExit(f"engine adopt --undo: {e['from']} is not the link into {dest} (brain.py doctor says "
+                         "how to fix it): nothing changed")
+    key = tool_key_of(e.get("tool"))
+    running = lock_holders(dest, TOOLS.get(key, {}).get("locks", ()))
+    if running:
+        raise SystemExit(f"engine adopt --undo: the tool is running ({'; '.join(running)}): quit it first")
+    busy = procs_using(dest)
+    if busy and not force:
+        raise SystemExit("engine adopt --undo: these programs use " + str(dest) + " now (stop them first):\n" +
+                         "\n".join(f"  {pid} {cmd}" for pid, cmd in busy[:10]))
+    log = [x for x in engine_vault(base, name, undo=True) if "nothing to bring back" not in x]
+    os.unlink(src)
+    try:
+        os.rename(dest, src)
+    except OSError as x:
+        os.symlink(str(dest), str(src))
+        raise SystemExit(f"engine adopt --undo: could not move {dest} back ({x}); the link is back")
+    log.append(f"moved {dest} -> {e['from']} (a real folder again)")
+    reg = reg_load(base, ENGINES_REG)
+    reg["engines"].pop(name, None)
+    if not reg["engines"]:
+        reg.pop("engines")
+    if reg:
+        reg_save(base, ENGINES_REG, reg)
+    elif (base / ENGINES_REG).is_file():
+        (base / ENGINES_REG).unlink()
+    moves = reg_load(base, MOVES_LOG)
+    moves.setdefault("moves", []).append({"kind": "engine", "undo": True, "name": name, "from": str(dest),
+                                          "to": str(src), "at": dt.datetime.now().isoformat(timespec="seconds")})
+    reg_save(base, MOVES_LOG, moves)
+    log.append(f"a mirror is not made again by itself: `brain.py engine mirror {e['from']}` if you want one")
     return log
 
 
@@ -8712,15 +9101,51 @@ def mirror_files(src, keep, name="x"):
     return out
 
 
+def connect_rec(base):
+    """Our connect record from .kits.json ({} when the base is not connected)."""
+    try:
+        k = json.loads(read(pathlib.Path(base) / ".kits.json") or "{}")
+    except ValueError:
+        return {}
+    return ((k.get("kits") or {}).get("base-folder") or {}).get("connect") or {}
+
+
+def mirror_drop(base, name, dst, why):
+    """Remove a mirror we made (its MIRROR marker) and its engines.json entry. The source is never touched and a
+    source registered by someone else (sources.d) keeps its registration. Returns why, or None when nothing went."""
+    reg = reg_load(base, ENGINES_REG)
+    gone = False
+    e = reg.get("engines", {}).get(name)
+    if isinstance(e, dict) and e.get("mode") == "mirror":
+        reg["engines"].pop(name)
+        reg_save(base, ENGINES_REG, reg)
+        gone = True
+    if (dst / "MIRROR").is_file():
+        shutil.rmtree(dst, ignore_errors=True)
+        gone = True
+    return f"engines/{name}: mirror removed ({why})" if gone else None
+
+
 def mirror_sync(base, home=None, quiet=True):
     """Bring every mirror up to date (copy changed files, drop removed ones, leave out secret-looking text).
-    Returns the names of the mirrors that changed."""
+    A mirror that must not exist goes: its source is inside the base, it is ~/.agents/skills, or its tool is not
+    installed. Returns the names of the mirrors that changed."""
     base, home = pathlib.Path(base).resolve(), pathlib.Path(home or home_dir())
-    changed = []
+    changed, reg = [], reg_load(base, ENGINES_REG).get("engines", {})
+    mine = Connector(base).created_files(connect_rec(base))
+    skills = os.path.normpath(str(home / SKILLS_DIR))
     for name, src, keep in mirror_sources(base, home):
         dst = base / "engines" / name
-        if in_dir(src, base):
-            continue                                    # never mirror the base into itself
+        e = reg.get(name) if isinstance(reg.get(name), dict) else {}
+        key = tool_key_of(e.get("tool")) if e.get("tool") else None
+        why = ("its source is inside the base" if in_dir(src, base) else
+               "~/.agents/skills is connect's copy, not a source" if os.path.normpath(str(src)) == skills else
+               "the tool is not installed" if key in TOOLS and not tool_installed(home, TOOLS[key], mine) else None)
+        if why:
+            gone = mirror_drop(base, name, dst, why)
+            if gone:
+                changed.append(name)
+            continue
         want = mirror_files(src, keep, name) if src.exists() else {}
         n, skipped = 0, []
         dst.mkdir(parents=True, exist_ok=True)
@@ -8769,6 +9194,8 @@ def engine_mirror(base, tool, name=None, keep=None):
     else:
         src = pathlib.Path(os.path.abspath(os.path.expanduser(tool)))
         name = name or src.name.strip(".") or "tool"
+    if key in TOOLS and not tool_installed(home, TOOLS[key], Connector(base).created_files(connect_rec(base))):
+        raise SystemExit(f"engine mirror: {tool} is not installed (no program on PATH): nothing to mirror")
     if not src.exists():
         raise SystemExit(f"engine mirror: {src} does not exist")
     if in_dir(src, base):
@@ -9005,7 +9432,8 @@ def projects_undo(base, slug=None, force=False):
     base, home, log = pathlib.Path(base).resolve(), home_dir(), []
     moves = reg_load(base, MOVES_LOG)
     lst = moves.get("moves", [])
-    i = next((j for j in range(len(lst) - 1, -1, -1) if slug is None or lst[j]["slug"] == slug), None)
+    i = next((j for j in range(len(lst) - 1, -1, -1) if lst[j].get("kind", "project") == "project"
+              and (slug is None or lst[j].get("slug") == slug)), None)   # engine moves have their own undo
     if i is None:
         raise SystemExit("projects move --undo: no move recorded" + (f" for {slug}" if slug else ""))
     m = lst[i]
@@ -9123,6 +9551,53 @@ def adopt_guard(base, key, d, home):
     return None
 
 
+def leftover_rows(base, home):
+    """Our block still in the rules file of a tool that is not installed: WARN, and the command that removes it."""
+    c, out = Connector(base), []
+    mine = c.created_files(connect_rec(base))
+    for key, t in sorted(TOOLS.items()):
+        if t.get("status") in ("discontinued", "app") or tool_installed(home, t, mine):
+            continue
+        for pat, _ in t["rules"]:
+            for r in c.rules_files(pat):
+                if find_block(read(home / r) or ""):
+                    out.append(("WARN", f"{t['name']}: ~/{r} has our block but it is not installed -> brain.py connect "
+                                        "(archives it, then removes only our block)"))
+    return out
+
+
+def link_rows(base, home):
+    """F7: each tool adopted by a link (engines.json "link"): the link at its old place must resolve into
+    engines/NAME. Broken, pointing elsewhere or replaced by a real folder: an ERROR with the fix."""
+    rows = []
+    for n, e in sorted(reg_load(base, ENGINES_REG).get("engines", {}).items()):
+        if not (isinstance(e, dict) and e.get("mode") == "adopted" and e.get("link") and e.get("from")):
+            continue
+        src, dest = pathlib.Path(expand(e["from"], home)), pathlib.Path(base) / "engines" / n
+        fix_ln = f"ln -sfn {shq(str(dest))} {shq(str(src))}"
+        if n == SKILLS_ENGINE:
+            fix_ln = "brain.py connect"
+        if not dest.is_dir() or dest.is_symlink():
+            rows.append(("ERROR", f"engines/{n}: adopted by a link but the folder is missing (restore it from a "
+                                  f"backup, or drop the engines.json entry)"))
+        elif src.is_symlink() and os.path.realpath(src) == os.path.realpath(dest):
+            rows.append(("OK", f"{e['from']}: link into engines/{n}"))
+        elif src.is_symlink():
+            rows.append(("ERROR", f"{e['from']}: the link is broken or points elsewhere ({os.readlink(src)}), not "
+                                  f"into engines/{n} -> {fix_ln}"))
+        elif src.is_dir():
+            how = fix_ln if n == SKILLS_ENGINE else \
+                f"quit the tool, mv {shq(str(src))} {shq(str(src) + '.new')} && {fix_ln}, then merge what it wrote"
+            rows.append(("ERROR", f"{e['from']}: a real folder replaced the link into engines/{n} (the tool, or "
+                                  f"something else, made a fresh one) -> {how}"))
+        elif os.path.lexists(src):
+            rows.append(("ERROR", f"{e['from']}: a file replaced the link into engines/{n} -> move it away, then "
+                                  f"{fix_ln}"))
+        else:
+            rows.append(("ERROR", f"{e['from']}: the link into engines/{n} is missing -> {fix_ln}"))
+    return rows
+
+
 def doctor(base, strict=False):
     base, home = pathlib.Path(base).resolve(), home_dir()
     rows = []                                          # (level, text)
@@ -9142,12 +9617,16 @@ def doctor(base, strict=False):
                 rows.append(("WARN", f"{name}: registered dir {d} does not exist"))
             continue
         tag = "in the base" if in_dir(d, base) else "OUTSIDE the base"
-        lvl = "OK" if in_dir(d, base) else ("OUTSIDE" if os.path.normpath(str(d)) not in mirrors else "OK")
+        lvl = "OK" if in_dir(d, base) else "OUTSIDE"
         how = f"set by {var}" if var and not extra else ("extra dir" if extra else "default place")
         hint = ""
         if lvl == "OUTSIDE":
-            hint = f" -> brain.py engine adopt {next((i for i, k in TOOL_IDS.items() if k == key), key)}" \
-                if engine_var(key) and not extra else " -> brain.py engine mirror " + home_rel(d, home)
+            if engine_var(key) and not extra:
+                hint = f" -> brain.py engine adopt {next((i for i, k in TOOL_IDS.items() if k == key), key)}"
+            elif os.path.normpath(str(d)) in mirrors:
+                hint = " -> no setting moves it: it stays outside (engines/ keeps a read-only copy)"
+            else:
+                hint = " -> brain.py engine mirror " + home_rel(d, home)
         rows.append((lvl, f"{name}: {home_rel(d, home)} ({how}, {tag}){hint}"))
         default = pathlib.Path(home) / key
         if var and not extra and default.is_dir() and not in_dir(default, d):
@@ -9165,10 +9644,13 @@ def doctor(base, strict=False):
         if key in TOOL_IDS.values() or key.split("/")[0] in TOOL_HOMES:
             continue
         p = home / key
-        if p.is_dir() and not p.is_symlink() and not in_dir(p, base) and os.path.normpath(str(p)) not in mirrors \
-                and key not in allow:
-            rows.append(("OUTSIDE", f"{TOOLS[key]['name']}: ~/{key} (no setting moves it) -> brain.py engine mirror "
-                                    f"~/{key}"))
+        if p.is_dir() and not p.is_symlink() and not in_dir(p, base) and key not in allow:
+            hint = (f" -> brain.py engine adopt {TOOLS[key]['id']} (quit the app first; moves it into the base "
+                    "and leaves a link)" if TOOLS[key].get("adopt") == "link" else
+                    " -> no setting moves it: it stays outside (engines/ keeps a read-only copy)"
+                    if os.path.normpath(str(p)) in mirrors else f" -> brain.py engine mirror ~/{key}")
+            rows.append(("OUTSIDE", f"{TOOLS[key]['name']}: ~/{key} (no setting moves it){hint}"))
+    rows += link_rows(base, home)
     for key, d in tool_dirs(home, base):
         rules, mem = ai_signals(d)
         if (rules or mem) and os.path.normpath(str(d)) not in mirrors:
@@ -9191,6 +9673,7 @@ def doctor(base, strict=False):
                 kind = "worktree" if (d / ".git").is_file() else "repo"
                 rows.append(("OUTSIDE", f"code {kind} {home_rel(d, home)} -> brain.py projects move "
                                         f"{home_rel(d, home)}"))
+    rows += leftover_rows(base, home)
     rows += doctor_git(base)
     rows += vault_rows(base)
     if vault_page(base):
@@ -9414,7 +9897,7 @@ def main(argv):
                 log = revault(base, rest[1] if len(rest) == 2 else None, dry) or ["re-vault: every vaulted path is "
                                                                                   "still a link: nothing to do"]
             elif sub == "adopt":
-                log = engine_adopt(base, rest[1], force)
+                log = engine_adopt(base, rest[1], force, undo)
             elif sub == "release":
                 log = engine_release(base, rest[1], force)
             elif sub == "mirror":

@@ -2,6 +2,56 @@
 
 Changes to the skeleton structure and tools (not to anyone's content).
 
+## v1.6.6 - 2026-11-13
+- **Installed means proof, not folders**. connect made folders itself, so a folder alone kept a tool "installed" for
+  ever (the loop was self-perpetuating). Now a tool is installed when its program is on PATH (with its folder) or one of
+  its own files exists that connect did not create. Marks changed (audit of every row): `.claude` -> `.claude.json`;
+  `.codex` -> `.codex/auth.json`, `.codex/config.toml`; `.qwen` -> `.qwen/oauth_creds.json`, `.qwen/settings.json`;
+  `.config/opencode` -> `.config/opencode/opencode.json`, `.jsonc`; `.hermes` -> `.hermes/config.yaml`, `SOUL.md`;
+  `.openclaw` -> `.openclaw/workspace/AGENTS.md`; `.codeium/windsurf` -> `.codeium/windsurf/mcp_config.json`;
+  `.kiro` -> `.kiro/settings/mcp.json`, `permissions.yaml`; `.cline` (and `Documents/Cline`) -> `.cline/data/settings/
+  cline_mcp_settings.json`, `global-settings.json`; `.continue` -> `.continue/permissions.yaml`, `config.yaml`; `.junie`
+  -> `.junie/allowlist.json`, `mcp/mcp.json`; `.cursor` -> `.cursor/cli-config.json`, `sandbox.json`, `mcp.json`.
+  Unchanged: file marks, and `.kilocode` (connect never writes there). Bin + folder rule for programs is unchanged.
+- **Not installed = nothing written, and our block goes**. A tool that is not installed but still has our block in its
+  rules file loses only that block (archived in `.brain/backups` first; the file is deleted only if it is then empty;
+  its folders only if empty). Hooks in `~/.claude/settings.json` are written only when Claude Code is installed.
+- **Mirrors**: a mirror whose source is inside the base, a mirror of `~/.agents/skills`, and a mirror of a tool that is
+  not installed are removed (folder with its MIRROR marker, and its engines.json entry; sources are never touched).
+  `engine mirror` refuses a tool that is not installed.
+- **Doctor**: a mirror is OUTSIDE (counted in "outside the base"), with `engine adopt <tool>` when the tool has a
+  setting, else "no setting moves it". Our block left in a not-installed tool's rules file: WARN with `brain.py connect`.
+- **Auto-connect adopts**: a tool that becomes installed and has a setting is moved into `engines/<tool>` by the watch
+  cycle (existing installs are not moved: the first run only records what is installed; `watch.json` `seen_tools`).
+  If adopt cannot run safely, it is reported and left where it is.
+- Tests: `BaseFirstTests`, and the older fixtures that used a bare folder as proof now write the tool's own file.
+- **Adopt by symlink** (`engine adopt <tool>` for a tool with no setting that moves its folder): the folder moves
+  into `engines/<name>` (one rename), a symlink is left at the old place, then checked (it resolves, files are
+  readable); any failure undoes it all. It refuses while the tool runs (the lock/pid files its TOOLS row names,
+  e.g. Electron's `SingletonLock` `<host>-<pid>` with that pid alive; `--force` does not skip this), when the target
+  exists, when the source is already a link into the base, and across filesystems (it says how much space a copy
+  would need and copies nothing). `engine adopt --undo <tool>` is the exact reverse (secrets back from the vault
+  first). engines.json records it (`mode: adopted`, `link: true`); `.brain/moves.json` logs it (`kind: engine`;
+  `projects move --undo` skips those).
+- The adopted folder **replaces its mirror**: the mirror folder and its engines.json entry go.
+- **Secrets to the vault**: the same `engine vault` mechanism, with per-tool secret names in the TOOLS row
+  (`vault`: a name, or `x/` for a folder that moves as one link). **Heavy folders** (TOOLS row `heavy`) get hard deny
+  lines in the generated `.gitignore` and `.stignore` blocks (also under sync all, so the sync scan never walks them)
+  and are never walked by the vault.
+- **Claude desktop app** (`claude-desktop`, `~/.config/Claude`, status app, no program): installed when its own
+  `config.json` or `Local State` is there. Vaulted: Cookies(-journal), buddy-tokens.json, ant-did,
+  ant-device-registry.json, Trust Tokens*, claude_desktop_config.json (MCP env keys), config.json (holds
+  `oauth:tokenCache`), Local Storage/, Session Storage/, IndexedDB/, WebStorage/. Kept out of git and Syncthing:
+  vm_bundles/, claude-code-vm/, claude-code/, Cache/, Code Cache/, GPUCache/, Dawn*Cache/, Crashpad/, logs/, sentry/,
+  blob_storage/, fcache, Shared Dictionary/. Doctor's hint for it is now `engine adopt claude-desktop`.
+- **`~/.agents/skills` is a link** to `engines/agents-skills` (`mode: adopted`, written by connect; no more
+  mirror circle): connect makes the link and writes its copies there; an old folder becomes the link only when it
+  holds nothing but connect's own copies (else it is reported once and left as it is); disconnect removes the link
+  and the folder. The copies and an engines.json that holds only their entry are listed with their hash in the kit's
+  `created` record (like the kit's own files), so an installer that guards your data knows they are connect's.
+- **Doctor**: a tool adopted by a link whose link is broken, missing, points elsewhere or was replaced by a real
+  folder is an ERROR with the fix command. Tests: `AdoptByLinkTests` (a fake `~/.config/Claude`), `SkillsLinkTests`.
+
 ## v1.6.5 - 2026-11-13
 - **sync all: Syncthing scans only after our scan**. A new file holding a secret could reach the other computer before
   the next content scan, because Syncthing watched the folder itself (the base has more directories than inotify

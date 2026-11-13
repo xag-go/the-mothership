@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.2.7 (2026-11-13)
+
+- Every AI tool lives in the base from day one. Skeleton Base 1.6.6 `77eb181` is vendored: a tool counts as installed
+  only from its program or a file it makes itself (never a folder connect writes into); connect writes nothing for a
+  tool that is not installed and removes its own leftover block; no mirror of a source inside the base or of a tool
+  that is not installed; doctor counts mirrors as outside the base; watch adopts a newly installed tool; `engine adopt`
+  moves a tool without a setting into the base behind a symlink (Claude desktop app, `~/.agents/skills`), secrets to
+  the vault, heavy folders kept out of git and Syncthing. Tests follow: a tool is proven by its own file, and connect's copies in `engines/agents-skills` are removed by disconnect.
+- Frugal-Bridge 2.43 `bb786f5`: install never writes or keeps its rules for a tool that is not installed.
+
 ## v1.2.6 (2026-11-13)
 
 - Tests leave nothing behind in TMPDIR: the-mothership's own temp dirs get a cleanup right after they are made, and

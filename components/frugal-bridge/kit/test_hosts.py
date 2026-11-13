@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -402,23 +403,100 @@ def test_report_merges_every_log(home, monkeypatch):
     assert p.returncode == 0 and "| codex |" in p.stdout
 
 
-def test_tool_gone_keeps_block_current_adds_nothing(home, monkeypatch, capsys):
+def test_tool_gone_block_removed_backed_up_file_deleted_if_empty(home, monkeypatch, capsys):
+    """A host installed earlier and gone now: its Frugal block is removed (the file goes when it is then empty), the
+    old file is backed up first, and nothing else of the tool is touched."""
     FH.build(home, ["gemini"], monkeypatch, S, HOSTS)
     assert install("gemini") == 0
-    assert S.main(["setup.py", "uninstall", "--global"]) == 0
-    reg = home / ".frugal-bridge" / "global.json"
-    # an older install registered gemini with only its rules block; the CLI is gone now (an IDE still reads the file)
-    (home / ".gemini" / "GEMINI.md").write_text("<!-- frugal-bridge:start v5 -->\nOLDTEXT\n<!-- frugal-bridge:end -->\n")
-    reg.write_text(json.dumps({"tools": {"gemini": {"file": str(home / ".gemini" / "GEMINI.md"), "mode": "new",
-                                                    "created": True, "block_sha": []}}}))
-    monkeypatch.setattr(S.shutil, "which", lambda b: None)
+    gem = home / ".gemini" / "GEMINI.md"
+    assert "frugal-bridge:start" in gem.read_text()
     settings = read(home, ".gemini/settings.json")
-    assert install("gemini") == 0
+    agents = sorted(p.name for p in (home / ".gemini" / "agents").iterdir())
+    monkeypatch.setattr(S.shutil, "which", lambda b: None)
+    assert install() == 0                                   # hosts auto: nothing installed now
     out = capsys.readouterr().out
-    assert "skipped gemini: not installed" in out and "kept current: gemini" in out
-    t = read(home, ".gemini/GEMINI.md")
-    assert t.count("frugal-bridge:start v6") == 1 and "OLDTEXT" not in t
-    assert read(home, ".gemini/settings.json") == settings and not (home / ".gemini" / "agents").exists()
+    assert "skipped gemini: not installed" in out and "GEMINI.md" in out
+    assert not gem.exists()                                 # it held only our block
+    backed = list((home / ".frugal-bridge" / "backup").rglob("GEMINI.md"))
+    assert backed and "frugal-bridge:start" in backed[0].read_text()
+    assert read(home, ".gemini/settings.json") == settings
+    assert sorted(p.name for p in (home / ".gemini" / "agents").iterdir()) == agents   # first install's files stay
+
+
+def test_tool_gone_user_text_kept_only_block_removed(home, monkeypatch, capsys):
+    FH.build(home, ["gemini"], monkeypatch, S, HOSTS)
+    gem = home / ".gemini" / "GEMINI.md"
+    gem.write_text("# my own rules\nkeep me\n")
+    assert install("gemini") == 0
+    assert "frugal-bridge:start" in gem.read_text()
+    monkeypatch.setattr(S.shutil, "which", lambda b: None)
+    assert install() == 0
+    assert gem.read_text() == "# my own rules\nkeep me\n"  # byte-identical to before Frugal
+
+
+def test_tool_gone_other_kit_block_stays(home, monkeypatch):
+    """A base's block in the same file is another kit's: only the Frugal block goes."""
+    FH.build(home, ["gemini"], monkeypatch, S, HOSTS)
+    gem = home / ".gemini" / "GEMINI.md"
+    base = "<!-- base-folder:start v1 -->\nbase text\n<!-- base-folder:end -->\n"
+    gem.write_text(base)
+    assert install("gemini") == 0
+    assert "frugal-bridge:start" in gem.read_text() and "base text" in gem.read_text()
+    monkeypatch.setattr(S.shutil, "which", lambda b: None)
+    assert install() == 0
+    assert gem.read_text() == base
+
+
+def test_tool_gone_without_registry_block_still_removed(home, monkeypatch):
+    """A block left behind by an install no longer in the registry is removed too (the file itself decides)."""
+    gem = home / ".gemini" / "GEMINI.md"
+    gem.parent.mkdir(parents=True)
+    gem.write_text("<!-- frugal-bridge:start v5 -->\nOLDTEXT\n<!-- frugal-bridge:end -->\n")
+    monkeypatch.setattr(S.shutil, "which", lambda b: None)
+    install()                                  # no tool at all: check() reports PROBLEMS (exit 1), which is fine here
+    assert not gem.exists()
+
+
+def test_shared_rules_file_kept_while_a_sharing_host_is_installed(home, monkeypatch):
+    """Gemini CLI and Antigravity read the same ~/.gemini/GEMINI.md: Gemini gone but Antigravity present keeps the block."""
+    FH.build(home, ["gemini", "antigravity"], monkeypatch, S, HOSTS)
+    assert install("gemini") == 0
+    gem = home / ".gemini" / "GEMINI.md"
+    monkeypatch.setattr(S.shutil, "which", lambda b: "/fake/bin/antigravity" if b == "antigravity" else None)
+    assert install() == 0                                   # Antigravity installed (its bin), Gemini CLI not
+    assert gem.read_text().count("frugal-bridge:start v6") == 1
+
+
+@pytest.mark.parametrize("tool", [t for t in ALL if HOSTS.H[t].get("rules") not in (None, "aider-read")])
+def test_absent_host_untouched_on_install_and_refresh(tool, home, monkeypatch, capsys):
+    """install --global (auto) and a refresh run write nothing under the root of a tool that is not installed, and
+    none of its rules files gets a Frugal block."""
+    keep = "codex" if tool == "claude-code" else "claude-code"
+    FH.build(home, [keep, tool], monkeypatch, S, HOSTS)
+    root = os.path.realpath(HOSTS.root(tool)) if HOSTS.root(tool) else None
+    own = [HOSTS.expand(tool, HOSTS.H[tool]["rules"])]
+    under = lambda p: root and os.path.realpath(os.path.join(str(home), p)).startswith(root + os.sep)
+    # 1. the tool is installed: registry records it
+    assert install() == 0
+    # 2. the tool goes away (its binary and proof files are gone; its own config stays, as on a real machine)
+    monkeypatch.setattr(S.shutil, "which", lambda b: f"/fake/bin/{b}" if b in [HOSTS.H[keep]["bins"][0]] else None)
+    for p in HOSTS.H[tool].get("proof") or []:
+        q = HOSTS.expand(tool, p)
+        if os.path.isdir(q):
+            shutil.rmtree(q)
+        elif os.path.exists(q):
+            os.remove(q)
+    assert install() == 0
+    capsys.readouterr()
+    # 3. refresh runs: nothing under the absent tool's root changes any more, and no Frugal block is in its rules file
+    before = FH.snapshot(home)
+    assert install() == 0
+    assert install() == 0
+    after = FH.snapshot(home)
+    changed = [p for p in set(before) | set(after) if before.get(p) != after.get(p) and under(p)]
+    assert changed == [], changed
+    for f in own:
+        assert not (os.path.exists(f) and "frugal-bridge:start" in open(f).read()), f
 
 
 def test_upgrade_from_older_install_keeps_keys_added_since(home, monkeypatch):

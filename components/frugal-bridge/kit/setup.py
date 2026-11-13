@@ -36,7 +36,7 @@ ROOT = os.path.dirname(KIT)
 sys.path.insert(0, KIT)
 import hosts as HOSTS  # noqa: E402  (kit/hosts.py: the table of agent tools)
 VERSION = "6"          # rules-block marker (changes only when the block format changes)
-RELEASE = "2.42"       # the Frugal-Bridge release: what install --global and the base compare
+RELEASE = "2.43"       # the Frugal-Bridge release: what install --global and the base compare
 START, END = "<!-- frugal-bridge:start v{v} -->", "<!-- frugal-bridge:end -->"
 START_RE = re.compile(r"<!-- frugal-bridge:start v[^>]*-->")
 BASE_END = "<!-- base-folder:end -->"
@@ -974,12 +974,14 @@ class GlobalSetup(Setup):
             if t not in sel:
                 self.log.append(f"skipped {t}: not installed (no {' / '.join(HOSTS.H[t]['bins'])} on PATH and none of "
                                 f"{', '.join(HOSTS.expand(t, x) for x in HOSTS.H[t].get('proof') or []) or 'its own config files'})")
-        kept_only = set()      # installed earlier, tool not found now: keep its rules block current, add nothing
+        # installed earlier, not installed now: nothing is written for it; its Frugal rules block is removed (see
+        # drop_absent_rules). "tool@dir" keys (extra dirs) are wired below, never here.
+        absent = []
         for t in list(tools) + list((r.get("copied") or {})):
-            if t in HOSTS.H and t not in sel:      # "tool@dir" keys (extra dirs) are wired below, never here
-                sel.append(t); kept_only.add(t)
-                self.log.append(f"kept current: {t} (installed earlier; tool not found now, so only its rules block "
-                                f"is refreshed — nothing new added)")
+            if t in HOSTS.H and t not in sel and t not in absent:
+                absent.append(t)
+                self.log.append(f"skipped {t}: not installed (installed earlier; its Frugal-Bridge rules block is "
+                                f"removed, nothing is added)")
         # every (instance key, tool, dir or None for the default dir) to wire: the default dir of each tool, then each
         # extra dir of a tool (same block, hooks and settings as its default dir)
         extras = self.wanted_dirs(r)
@@ -1011,7 +1013,6 @@ class GlobalSetup(Setup):
             body = rules + GLOBAL_NOTE.format(user=user)
         r.pop("needs_user", None)
         files, via = self.plan_rules(insts)
-        old_tiers = dict(r.get("tiers") or {})
         tiers_out = r["tiers"] = {}
         hook = os.path.join(self.d, HOOK_FILE)
         need_hook = any(HOSTS.H[t].get("hooks") not in (None, "hermes-plugin") for _, t, _ in insts)
@@ -1024,12 +1025,6 @@ class GlobalSetup(Setup):
         tier_txt, pending = {}, {}
         for ik, t, home in insts:
             with HOSTS.home_override(t, home):
-                if ik in kept_only:
-                    prev_rows = (old_tiers.get(ik) or {}).get("rows") or []
-                    if old_tiers.get(ik):
-                        tiers_out[ik] = old_tiers[ik]
-                    tier_txt[ik] = HOSTS.tier_rules(t, table, prev_rows)
-                    continue
                 fs, changes, rows, note = HOSTS.tier_files(t, table)
                 for f, text in fs.items():
                     self.own_file(t, f, text)
@@ -1046,10 +1041,8 @@ class GlobalSetup(Setup):
                     self.log.append(f"{ik} tiers: {note}")
                 tier_txt[ik] = HOSTS.tier_rules(t, table, rows)
         # 2. hooks / plugins
-        native = [t for t in (r.get("native_hooks") or []) if t in kept_only]
+        native = [t for t in (r.get("native_hooks") or []) if t in absent]    # an absent tool keeps its record
         for ik, t, home in insts:
-            if ik in kept_only:
-                continue
             with HOSTS.home_override(t, home):
                 spec = HOSTS.hook_spec(t, hook, has_cc)
                 if spec is None:
@@ -1091,9 +1084,10 @@ class GlobalSetup(Setup):
             with HOSTS.home_override(t, home):
                 self._wire_rules(r, tools, ik, t, home, body, tier_txt, files, via, done_files)
         for ik, t, home in insts:
-            if (ik in tools or ik in (r.get("copied") or {})) and ik not in kept_only:
+            if ik in tools or ik in (r.get("copied") or {}):
                 with HOSTS.home_override(t, home):
                     self.copy_skills_for(t, r)
+        self.drop_absent_rules(r, tools, insts)
         r["version"] = VERSION
         r["written"] = {**(r.get("written") or {}), **(getattr(self, "written", None) or {})}
         write(self.reg_path(), json.dumps(r, indent=2) + "\n")
@@ -1208,6 +1202,45 @@ class GlobalSetup(Setup):
         else:
             self.change(f, new)
 
+    def rule_files(self, t):
+        """Every user-level rules file a tool may hold a Frugal block in (in the tool's current home)."""
+        h = HOSTS.H[t]
+        names = [h.get("rules"), h.get("override")] + list(h.get("base_files") or [])
+        return list(dict.fromkeys(HOSTS.expand(t, x) for x in names if x and x != "aider-read"))
+
+    def drop_absent_rules(self, r, tools, insts):
+        """A tool that is not installed (installed(t) False) gets no Frugal block. Its block is removed from its rules
+        files, unless an installed host (any installed tool, any of its homes) reads the same file. Only the Frugal
+        block goes (another kit's block stays); a file left empty is deleted, every changed file is backed up first."""
+        keep = set()
+        for t in HOSTS.H:
+            if HOSTS.installed(t):
+                keep.update(self.rule_files(t))
+        for ik, t, home in insts:
+            with HOSTS.home_override(t, home):
+                keep.update(self.rule_files(t))
+        for t in HOSTS.H:
+            if HOSTS.installed(t):
+                continue
+            info = tools.get(t) or {}
+            cands = list(dict.fromkeys(self.rule_files(t) + ([info["file"]] if info.get("file") else [])))
+            for f in cands:
+                if f in keep or not os.path.isfile(f):
+                    continue
+                cur = read(f) or ""
+                if not self.find_block(cur):
+                    continue
+                new, _ = self.strip_block(cur, info.get("mode") if info.get("file") == f else None)
+                if new.strip():
+                    self.change(f, new)
+                    self.log.append(f"removed the Frugal-Bridge block from {f} ({t} is not installed; the rest of the "
+                                    f"file is kept)")
+                else:
+                    self.backup(f); os.remove(f)
+                    self.log.append(f"removed {f} (empty after removing the Frugal-Bridge block; {t} is not installed)")
+            for k in ("file", "mode", "block_sha", "created", "via", "same_as"):   # its rules are no longer recorded
+                info.pop(k, None)
+
     # ------------------------------------------------------------ uninstall
     def uninstall(self):
         r = self.r = self.reg()
@@ -1301,6 +1334,8 @@ class GlobalSetup(Setup):
             if info.get("rules_copy"):
                 ex = os.path.isfile(info["rules_copy"])
                 out.append(f"{t}: rules from {info['rules_copy']} ({'hook / read: list' if ex else 'MISSING'})"); ok &= ex
+                continue
+            if not info.get("file"):      # a tool that is not installed now: no rules block recorded for it
                 continue
             txt = read(info["file"]) or ""
             n = len(START_RE.findall(txt)); b = len(txt.encode())

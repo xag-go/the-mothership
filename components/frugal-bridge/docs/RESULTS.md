@@ -991,3 +991,16 @@ Readings:
 - Tests: `adapter/test_roles.py` 5 (from 6ba073c); `kit/test_setup.py` 1 new (RELEASE exists and matches the newest
   RESULTS section).
 - Not done: no new A/B run for the CORE wording in this entry (checked in 6ba073c's real matrix only).
+
+### 2.43 Absent tools get no Frugal-Bridge files; the block is removed from a tool that is gone (2026-11-13)
+- Change: a tool that is not installed (no binary, no proof files) gets no Frugal block, skill, hook, agent or plugin
+  on install or refresh. A rules block left by an earlier install is removed from that tool's rules file (only the
+  Frugal block; another kit's block stays; the file is deleted only if empty; backed up first). A rules file shared
+  with an installed host (Gemini CLI and Antigravity both read ~/.gemini/GEMINI.md) is kept.
+  Cause: `install()` added every registry tool that was not installed to the set it wires ("kept current"), so its
+  rules block was rewritten on each run.
+- Tests: `kit/test_hosts.py` 4 new tests for the removal cases, plus a parametrized test over every tool with a
+  rules file (absent after install: nothing under its root changes); the old "tool gone keeps block current" test
+  is replaced, since it asserted the bug.
+- Not done: hooks, skills and plugins that an earlier install put in an absent tool's folder are left in place
+  (uninstall still removes them); no A/B run (no model output involved).
