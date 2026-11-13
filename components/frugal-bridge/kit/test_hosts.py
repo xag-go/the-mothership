@@ -413,7 +413,7 @@ def test_tool_gone_block_removed_backed_up_file_deleted_if_empty(home, monkeypat
     settings = read(home, ".gemini/settings.json")
     agents = sorted(p.name for p in (home / ".gemini" / "agents").iterdir())
     monkeypatch.setattr(S.shutil, "which", lambda b: None)
-    assert install() == 0                                   # hosts auto: nothing installed now
+    install()  # no tool at all: check() reports PROBLEMS (exit 1), fine here                                   # hosts auto: nothing installed now
     out = capsys.readouterr().out
     assert "skipped gemini: not installed" in out and "GEMINI.md" in out
     assert not gem.exists()                                 # it held only our block
@@ -430,7 +430,7 @@ def test_tool_gone_user_text_kept_only_block_removed(home, monkeypatch, capsys):
     assert install("gemini") == 0
     assert "frugal-bridge:start" in gem.read_text()
     monkeypatch.setattr(S.shutil, "which", lambda b: None)
-    assert install() == 0
+    install()  # no tool at all: check() reports PROBLEMS (exit 1), fine here
     assert gem.read_text() == "# my own rules\nkeep me\n"  # byte-identical to before Frugal
 
 
@@ -443,7 +443,7 @@ def test_tool_gone_other_kit_block_stays(home, monkeypatch):
     assert install("gemini") == 0
     assert "frugal-bridge:start" in gem.read_text() and "base text" in gem.read_text()
     monkeypatch.setattr(S.shutil, "which", lambda b: None)
-    assert install() == 0
+    install()  # no tool at all: check() reports PROBLEMS (exit 1), fine here
     assert gem.read_text() == base
 
 
@@ -528,3 +528,57 @@ def test_codex_stop_usage_hook_installed(home, monkeypatch):
     hooks = json.loads(read(home, ".codex/hooks.json"))["hooks"]
     assert {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "PostModelRequest"} <= set(hooks)
     assert "--event usage" in json.dumps(hooks["Stop"])
+
+
+# ------------------------------------------------------------------ an absent tool: the base's block is never touched
+BASE_BLOCK = ("<!-- base-folder:start v1 -->\nOld pointer: Then run `cd <base> && python3 tools/brain.py index`. "
+              "Keep a short copy in your own memory too.\n<!-- base-folder:end -->\n")
+
+
+def test_absent_tool_merged_form_keeps_base_block_verbatim(home, monkeypatch, capsys):
+    """The merged form a machine had: the base's block sits inside our block. Removing our block for an absent tool
+    leaves exactly the base's block, with its bytes, and nothing of ours."""
+    FH.build(home, ["gemini"], monkeypatch, S, HOSTS)
+    gem = home / ".gemini" / "GEMINI.md"
+    gem.parent.mkdir(parents=True, exist_ok=True)
+    gem.write_text("<!-- frugal-bridge:start v6 -->\nour rules\n" + BASE_BLOCK + "<!-- frugal-bridge:end -->\n")
+    monkeypatch.setattr(S.shutil, "which", lambda b: None)
+    install()
+    assert gem.exists() and gem.read_text() == BASE_BLOCK
+
+
+def test_absent_tool_base_below_ours_left_byte_identical(home, monkeypatch):
+    """The base connected first; our block was appended under it. Gemini then goes away: the base is byte-identical."""
+    FH.build(home, ["gemini"], monkeypatch, S, HOSTS)
+    gem = home / ".gemini" / "GEMINI.md"
+    gem.parent.mkdir(parents=True, exist_ok=True)
+    gem.write_text(BASE_BLOCK)
+    assert install("gemini") == 0
+    assert "frugal-bridge:start" in gem.read_text() and BASE_BLOCK in gem.read_text()
+    monkeypatch.setattr(S.shutil, "which", lambda b: None)
+    install()
+    assert gem.read_text() == BASE_BLOCK
+
+
+def test_base_above_ours_then_base_added_below_left_byte_identical(home, monkeypatch):
+    """Our block first (no base yet), then a base block appended below it: removing ours leaves the base verbatim."""
+    FH.build(home, ["gemini"], monkeypatch, S, HOSTS)
+    gem = home / ".gemini" / "GEMINI.md"
+    assert install("gemini") == 0
+    gem.write_text(gem.read_text() + "\n\n" + BASE_BLOCK)
+    monkeypatch.setattr(S.shutil, "which", lambda b: None)
+    install()
+    assert gem.read_text() == BASE_BLOCK
+
+
+def test_absent_tool_not_listed_and_record_dropped(home, monkeypatch, capsys):
+    FH.build(home, ["gemini", "claude-code"], monkeypatch, S, HOSTS)
+    assert install("gemini", "claude-code") == 0
+    monkeypatch.setattr(S.shutil, "which", lambda b: "/fake/bin/claude" if b == "claude" else None)
+    capsys.readouterr()
+    assert install() == 0
+    out = capsys.readouterr().out
+    assert "  gemini: rules" not in out and "  claude-code: rules" in out
+    reg = json.loads((home / ".frugal-bridge" / "global.json").read_text())
+    assert "gemini" not in (reg.get("tools") or {}) and "gemini" not in (reg.get("native_hooks") or [])
+    assert "claude-code" in reg["tools"]

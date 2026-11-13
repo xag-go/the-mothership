@@ -27,7 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.2.8"
+VERSION = "1.2.9"
 ROOT = Path(__file__).resolve().parent
 LOCK = "components.lock"
 STATE = ".mothership.json"
@@ -1030,8 +1030,14 @@ class Mothership:
         rc2, out2 = systemctl("enable", "--now", *units)
         if rc or rc2:
             self.say(f"- systemd: could not enable ({out or out2}); run by hand:\n    {cmd}")
-        else:
-            self.say(f"- systemd: enabled {' '.join(units)}")
+            return
+        self.say(f"- systemd: enabled {' '.join(units)}")
+        # enable --now leaves a running service as it is: after an update it would keep the old code in memory
+        svcs = [u for u in units if u.endswith(".service")]
+        if svcs:
+            rc3, out3 = systemctl("try-restart", *svcs)
+            self.say(f"- systemd: restarted {' '.join(svcs)} (new code)" if rc3 == 0 else
+                     f"- systemd: could not restart ({out3}); run by hand:\n    systemctl --user restart {' '.join(svcs)}")
 
     def finish(self):
         st = dict(self.st)

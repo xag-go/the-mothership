@@ -678,6 +678,10 @@ class SystemdTests(Base):
         self.assertIn("systemd: enabled skeleton-base-watch.service skeleton-base-collect.timer skeleton-base-tidy.timer", out)
         log = self.sd_log.read_text()
         self.assertIn("--user enable --now skeleton-base-watch.service skeleton-base-collect.timer skeleton-base-tidy.timer", log)
+        self.sd_log.write_text("")
+        out = self.ms("update", "--yes")                       # a running watcher must load the new code
+        self.assertIn("--user try-restart skeleton-base-watch.service", self.sd_log.read_text())
+        self.assertIn("restarted skeleton-base-watch.service", out)
         self.assertEqual(self.state()["systemd"]["enabled_by_us"],
                          ["skeleton-base-watch.service", "skeleton-base-collect.timer", "skeleton-base-tidy.timer"])
         self.ms("uninstall")

@@ -36,7 +36,7 @@ ROOT = os.path.dirname(KIT)
 sys.path.insert(0, KIT)
 import hosts as HOSTS  # noqa: E402  (kit/hosts.py: the table of agent tools)
 VERSION = "6"          # rules-block marker (changes only when the block format changes)
-RELEASE = "2.43"       # the Frugal-Bridge release: what install --global and the base compare
+RELEASE = "2.44"       # the Frugal-Bridge release: what install --global and the base compare
 START, END = "<!-- frugal-bridge:start v{v} -->", "<!-- frugal-bridge:end -->"
 START_RE = re.compile(r"<!-- frugal-bridge:start v[^>]*-->")
 BASE_END = "<!-- base-folder:end -->"
@@ -1041,7 +1041,7 @@ class GlobalSetup(Setup):
                     self.log.append(f"{ik} tiers: {note}")
                 tier_txt[ik] = HOSTS.tier_rules(t, table, rows)
         # 2. hooks / plugins
-        native = [t for t in (r.get("native_hooks") or []) if t in absent]    # an absent tool keeps its record
+        native = []          # an absent tool is not listed as wired (its record is dropped, see drop_absent_rules)
         for ik, t, home in insts:
             with HOSTS.home_override(t, home):
                 spec = HOSTS.hook_spec(t, hook, has_cc)
@@ -1230,7 +1230,7 @@ class GlobalSetup(Setup):
                 cur = read(f) or ""
                 if not self.find_block(cur):
                     continue
-                new, _ = self.strip_block(cur, info.get("mode") if info.get("file") == f else None)
+                new = self.strip_frugal(cur, info.get("mode") if info.get("file") == f else None)
                 if new.strip():
                     self.change(f, new)
                     self.log.append(f"removed the Frugal-Bridge block from {f} ({t} is not installed; the rest of the "
@@ -1238,8 +1238,24 @@ class GlobalSetup(Setup):
                 else:
                     self.backup(f); os.remove(f)
                     self.log.append(f"removed {f} (empty after removing the Frugal-Bridge block; {t} is not installed)")
-            for k in ("file", "mode", "block_sha", "created", "via", "same_as"):   # its rules are no longer recorded
-                info.pop(k, None)
+            if t in tools:      # the record goes: nothing lists or re-wires a tool that is not installed
+                tools.pop(t)
+                self.log.append(f"dropped the record of {t} (not installed)")
+
+    def strip_frugal(self, cur, mode):
+        """`cur` without our block. A base block nested inside our block is another kit's: it is kept verbatim. The
+        blank lines our block left in front of another kit's block go."""
+        a, b = self.find_block(cur)
+        nested = re.compile(r"<!-- base-folder:start[^>]*-->.*?<!-- base-folder:end -->", re.S).search(cur, a, b)
+        if nested:
+            keep = nested.group(0)
+            if cur[b:b + 1] == "\n" and keep.endswith("\n"):
+                b += 1
+            return cur[:a] + keep + cur[b:]
+        new, _ = self.strip_block(cur, mode)
+        if not cur[:a].strip():
+            new = re.sub(r"^\n+(?=<!-- )", "", new)
+        return new
 
     # ------------------------------------------------------------ uninstall
     def uninstall(self):

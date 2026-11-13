@@ -1004,3 +1004,13 @@ Readings:
   is replaced, since it asserted the bug.
 - Not done: hooks, skills and plugins that an earlier install put in an absent tool's folder are left in place
   (uninstall still removes them); no A/B run (no model output involved).
+
+### 2.44 An absent tool is not listed, and its record goes; a base block is never removed with ours (2026-11-13)
+- Change: a tool that is not installed has its record dropped from the global registry, so the install summary
+  and `check` no longer list it. Removing the Frugal block from its rules file keeps any base-folder block nested
+  inside ours verbatim (the base's own removal owns it), and drops the blank lines our block left in front of
+  another kit's block. Before: a file holding ours with a base block inside was deleted with the base in it.
+  `RELEASE = "2.44"`.
+- Tests: `kit/test_hosts.py` 4 new (merged form kept verbatim; base below ours; base added below ours after
+  install; absent tool not listed and record dropped).
+- Not done: a Hermes backend recorded for an absent Hermes is not restored by uninstall (its record is dropped).

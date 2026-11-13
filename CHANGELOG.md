@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.2.9 (2026-11-13)
+
+- `update` restarts a running watcher (`systemctl --user try-restart` of the services after `enable --now`): before,
+  the old code kept running in memory until the next reboot.
+- Skeleton Base 1.6.7 `3ae8a3c`: mirrors registered by older releases for tools that are not installed are removed on
+  connect and watch; connect removes its block from an absent tool's file by its markers (recorded or not, archived
+  first); an empty folder of an absent tool goes; doctor no longer lists absent tools as outside the base; older
+  generated skills copies count as connect's own.
+- Frugal-Bridge 2.44 `7b868a6`: removing its block from an absent tool's file keeps a base block nested in it; the
+  record of an absent tool is dropped, so it is no longer listed as wired.
+
 ## v1.2.8 (2026-11-13)
 
 - `update` (and install) checks no longer crash after a tool is removed: Frugal-Bridge 2.43 drops the rules file from
