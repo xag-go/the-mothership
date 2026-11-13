@@ -35,7 +35,8 @@ KIT = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(KIT)
 sys.path.insert(0, KIT)
 import hosts as HOSTS  # noqa: E402  (kit/hosts.py: the table of agent tools)
-VERSION = "6"
+VERSION = "6"          # rules-block marker (changes only when the block format changes)
+RELEASE = "2.42"       # the Frugal-Bridge release: what install --global and the base compare
 START, END = "<!-- frugal-bridge:start v{v} -->", "<!-- frugal-bridge:end -->"
 START_RE = re.compile(r"<!-- frugal-bridge:start v[^>]*-->")
 BASE_END = "<!-- base-folder:end -->"

@@ -797,3 +797,14 @@ def test_global_frugal_home_moved_inside_base_rewrites_hooks(tmp_path, monkeypat
     assert S.main(["setup.py", "check", "--global"]) == 0
     assert S.main(["setup.py", "uninstall", "--global"]) == 0
     assert json.loads(st.read_text()) == before
+
+
+def test_release_matches_newest_results():
+    """RELEASE is the number the Mothership compares; it must match the newest RESULTS section (2.NN)."""
+    import re as _re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = next(p for p in (os.path.join(root, "abtest", "RESULTS.md"), os.path.join(root, "docs", "RESULTS.md"))
+                if os.path.isfile(p))                 # the public export carries docs/RESULTS.md only
+    results = open(path).read()
+    newest = max(_re.findall(r"^### 2\.(\d+) ", results, _re.M), key=int)
+    assert S.RELEASE == f"2.{newest}"

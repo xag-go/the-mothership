@@ -882,6 +882,99 @@ class UpdateUninstallTests(Base):
             self.assert_order(f)
 
 
+class FrugalGlobalRefreshTests(Base):
+    """`update` re-runs Frugal-Bridge's user-level install with the kit the user has (global.json "kit", e.g. a
+    developer checkout) only when its RELEASE is newer than the vendored one; else with the vendored kit. The kit path
+    in global.json stays. VERSION (the rules-block marker) is not compared."""
+
+    def kit_copy(self, name, release, marker, drop_codex_stop=False):
+        """A copy of the vendored Frugal-Bridge with RELEASE set to `release` (None: no RELEASE line, an old kit)."""
+        dst = self.tmp / name
+        shutil.copytree(FB_VENDOR, dst)
+        s = dst / "kit" / "setup.py"
+        text = s.read_text()
+        if release is None:
+            text = re.sub(r'^RELEASE = .*\n', "", text, count=1, flags=re.M)
+        else:
+            text = re.sub(r'^RELEASE = "[^"]*"', f'RELEASE = "{release}"', text, count=1, flags=re.M)
+        s.write_text(text)
+        h = dst / "adapter" / "hooks" / "frugal_hook.py"
+        h.write_text(h.read_text() + f"\n# {marker} hook\n")
+        if drop_codex_stop:          # an older release: no Codex Stop hook (the newer one adds it)
+            hs = dst / "kit" / "hosts.py"
+            t = hs.read_text()
+            assert t.count('"Stop": [g("usage")], "PostModelRequest"') == 1
+            hs.write_text(t.replace('"Stop": [g("usage")], "PostModelRequest"', '"PostModelRequest"'))
+        return dst
+
+    def adopt_global(self, kit_dir):
+        """As if the user installed Frugal-Bridge from their own checkout before Mothership: global.json points there
+        and Mothership's state records the global install as the user's (adopted)."""
+        reg_path = self.home / ".frugal-bridge" / "global.json"
+        reg = json.loads(reg_path.read_text())
+        reg["kit"] = str(kit_dir)
+        reg_path.write_text(json.dumps(reg, indent=2) + "\n")
+        st_path = self.base / ".mothership.json"
+        st = json.loads(st_path.read_text())
+        st["own"]["frugal_global"] = "adopted"
+        st_path.write_text(json.dumps(st, indent=2) + "\n")
+        return json.loads(reg_path.read_text())
+
+    def stale_codex_hooks_install(self, old):
+        """Install the old kit's global hooks over Mothership's, without the Codex Stop hook (older release)."""
+        self.ms("--yes")
+        hook = self.home / ".frugal-bridge" / "frugal_hook.py"
+        codex_hooks = self.home / ".codex" / "hooks.json"
+        hooks = json.loads(codex_hooks.read_text())
+        hooks["hooks"].pop("Stop")
+        codex_hooks.write_text(json.dumps(hooks, indent=2) + "\n")
+        self.py(old / "kit" / "setup.py", "install", "--global")
+        self.assertNotIn('"Stop"', codex_hooks.read_text())
+        self.adopt_global(old)
+        return hook, codex_hooks
+
+    def test_update_refreshes_stale_global_install_of_older_own_kit(self):
+        old = self.kit_copy("frugal-old", "2.41", "OLD RELEASE", drop_codex_stop=True)
+        hook, codex_hooks = self.stale_codex_hooks_install(old)
+        self.assertIn(b"OLD RELEASE", hook.read_bytes())
+        out = self.ms("update", "--yes")
+        self.assertIn("checks: all OK", out)
+        self.assertIn("(release 2.41) is not newer", out)                         # the kit used is said
+        self.assertEqual(hook.read_bytes(), (FB_VENDOR / "adapter" / "hooks" / "frugal_hook.py").read_bytes())
+        self.assertIn('"Stop"', codex_hooks.read_text())                          # the hook only the new release has
+        self.assertEqual(json.loads((self.home / ".frugal-bridge" / "global.json").read_text())["kit"], str(old))
+        for f in self.rules():
+            self.assert_order(f)
+
+    def test_stale_checkout_with_same_release_gets_vendored_kit(self):
+        same = self.kit_copy("frugal-same", "2.42", "SAME RELEASE", drop_codex_stop=True)
+        hook, codex_hooks = self.stale_codex_hooks_install(same)
+        out = self.ms("update", "--yes")
+        self.assertIn("checks: all OK", out)
+        self.assertNotIn(b"SAME RELEASE", hook.read_bytes())
+        self.assertEqual(hook.read_bytes(), (FB_VENDOR / "adapter" / "hooks" / "frugal_hook.py").read_bytes())
+        self.assertIn('"Stop"', codex_hooks.read_text())
+
+    def test_own_kit_without_release_gets_vendored_kit(self):
+        old = self.kit_copy("frugal-norelease", None, "NO RELEASE", drop_codex_stop=True)
+        hook, codex_hooks = self.stale_codex_hooks_install(old)
+        out = self.ms("update", "--yes")
+        self.assertIn("checks: all OK", out)
+        self.assertIn("(release 0) is not newer", out)
+        self.assertEqual(hook.read_bytes(), (FB_VENDOR / "adapter" / "hooks" / "frugal_hook.py").read_bytes())
+
+    def test_update_respects_a_newer_own_checkout(self):
+        self.ms("--yes")
+        mine = self.kit_copy("frugal-mine", "2.43", "MY CHECKOUT")
+        self.py(mine / "kit" / "setup.py", "install", "--global")
+        self.adopt_global(mine)
+        out = self.ms("update", "--yes")
+        self.assertIn("checks: all OK", out)
+        self.assertIn(f"your own kit {mine}, release 2.43", out)
+        self.assertIn(b"MY CHECKOUT", (self.home / ".frugal-bridge" / "frugal_hook.py").read_bytes())
+        self.assertEqual(json.loads((self.home / ".frugal-bridge" / "global.json").read_text())["kit"], str(mine))
+
+
 class AdoptVersionTests(Base):
     """Adopting an existing base never downgrades it."""
 

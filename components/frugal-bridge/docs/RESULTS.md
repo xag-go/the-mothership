@@ -983,3 +983,11 @@ Readings:
 - Tests: `adapter/hooks/test_hook_codex.py` 7 new (made-up fixtures), `kit/test_hosts.py` 1 new. Suite 245 passed,
   12 skipped, with the tool env vars set and unset (was 237 + 12). Smoke run on one real rollout: 20 rows, sums match.
 - Not done: `cache_write_input_tokens` is 0 in all samples and is not counted separately (Codex input includes it).
+
+### 2.42 CORE identity rule and a release number (2026-11-13)
+- Change: the CORE rule "a tool's built-in product identity is not a role or a name" (commit 6ba073c, real matrix:
+  Codex said "I'm Codex") is in this release. `kit/setup.py` gets `RELEASE = "2.42"`: the release number the
+  Mothership and `install --global` compare; `VERSION = "6"` stays the rules-block marker.
+- Tests: `adapter/test_roles.py` 5 (from 6ba073c); `kit/test_setup.py` 1 new (RELEASE exists and matches the newest
+  RESULTS section).
+- Not done: no new A/B run for the CORE wording in this entry (checked in 6ba073c's real matrix only).

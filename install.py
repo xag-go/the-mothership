@@ -27,7 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.2.4"
+VERSION = "1.2.5"
 ROOT = Path(__file__).resolve().parent
 LOCK = "components.lock"
 STATE = ".mothership.json"
@@ -476,6 +476,22 @@ def connected_base():
     return None
 
 
+def frugal_kit_version(kit):
+    """The rules-block marker VERSION of a Frugal-Bridge kit (kit/setup.py); 0 when unknown. Not a release number."""
+    m = re.search(r'^VERSION *= *"?(\d+)', read(Path(kit) / "kit" / "setup.py") or "", re.M)
+    return int(m.group(1)) if m else 0
+
+
+def frugal_kit_release(kit):
+    """The RELEASE of a Frugal-Bridge kit as a tuple ("2.42" -> (2, 42)); (0,) when the kit has none (older kits)."""
+    m = re.search(r'^RELEASE *= *"(\d+(?:\.\d+)*)"', read(Path(kit) / "kit" / "setup.py") or "", re.M)
+    return tuple(int(x) for x in m.group(1).split(".")) if m else (0,)
+
+
+def release_text(rel):
+    return ".".join(map(str, rel))
+
+
 def own_frugal_kit():
     """A Frugal-Bridge kit the user has on their own (Skeleton Base looks in the same places)."""
     reg = frugal_reg() or {}
@@ -853,12 +869,13 @@ class Mothership:
         self.track("connect")
 
         if opts["frugal"]:
-            if own.get("frugal_global") == "adopted" and kit != self.fbk:
-                self.say(f"- Frugal-Bridge for this user: already installed (its own kit {kit}); re-run by connect")
-            else:
-                self.say("- Frugal-Bridge: install for this user and every tool found (--global --hosts auto)")
-                self.py(self.fbk / "kit" / "setup.py", "install", "--global", *self.frugal_hosts_arg(),
-                        *getattr(self, "frugal_extra", []))
+            # always re-run (never "already installed"): connect only adds tools new since its last run and does not
+            # refresh the hook script or the hooks of tools already there
+            gk, why = self.global_kit(own)
+            self.say(f"- Frugal-Bridge for this user: install --global --hosts auto with {why} (hook script, hooks, "
+                     "plugin and tiers of every tool)")
+            self.py(gk / "kit" / "setup.py", "install", "--global", *self.frugal_hosts_arg(gk),
+                    *getattr(self, "frugal_extra", []))
         self.track("frugal-global")
 
         self.set_kit_key(own)
@@ -910,19 +927,32 @@ class Mothership:
             write_if_changed(f, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
             self.say("- Claude Code: base removed from permissions.additionalDirectories")
 
-    def frugal_hosts_arg(self):
-        """`--hosts auto` when the vendored Frugal-Bridge has its hosts table (kit/hosts.py: every tool it knows,
-        installed ones only); older kits pick their tools themselves."""
-        return ["--hosts", "auto"] if (self.fbk / "kit" / "hosts.py").is_file() else []
+    def frugal_hosts_arg(self, kit=None):
+        """`--hosts auto` when the kit has its hosts table (kit/hosts.py: every tool it knows, installed ones only);
+        older kits pick their tools themselves."""
+        return ["--hosts", "auto"] if ((kit or self.fbk) / "kit" / "hosts.py").is_file() else []
 
     def frugal_version(self):
-        m = re.search(r'^VERSION *= *"?(\d+)', read(self.fbk / "kit" / "setup.py") or "", re.M)
-        return m.group(1) if m else "0"
+        return str(frugal_kit_version(self.fbk))
+
+    def global_kit(self, own):
+        """(kit dir, why) for Frugal-Bridge's user-level install. A kit the user has on their own (adopted: global.json
+        points at it, e.g. a developer checkout) is used only when its RELEASE is newer than the vendored one; a
+        checkout with the same or no RELEASE (stale) is not used: the vendored kit is installed and global.json keeps
+        the user's kit path. VERSION is the rules-block marker and is not compared."""
+        mine = own_frugal_kit() if own.get("frugal_global") == "adopted" else None
+        ours = frugal_kit_release(self.fbk)
+        if mine and mine.resolve() != self.fbk.resolve():
+            theirs = frugal_kit_release(mine)
+            if theirs > ours:
+                return mine, f"your own kit {mine}, release {release_text(theirs)}"
+            return self.fbk, (f"vendored release {release_text(ours)}: your own kit {mine} (release "
+                              f"{release_text(theirs)}) is not newer, so it is not used; its global.json kit path is "
+                              "kept")
+        return self.fbk, f"vendored release {release_text(ours)}"
 
     def frugal_kit_for_base(self, own):
-        if own.get("frugal_global") == "adopted":
-            return own_frugal_kit() or self.fbk
-        return self.fbk
+        return self.global_kit(own)[0]
 
     def set_kit_key(self, own):
         """Skeleton Base's watcher re-runs Frugal-Bridge's setup when a new tool appears; it finds the kit
@@ -932,9 +962,9 @@ class Mothership:
         kk = self.st["kit_key"]
         if reg is None:
             return
+        if own.get("frugal_global") == "adopted" and own_frugal_kit():
+            return                       # the user's own kit stays the kit, also on a later update (never switched)
         if own.get("frugal_global") == "adopted" and not kk.get("set"):
-            if own_frugal_kit():
-                return
             kk.update({"set": True, "previous": reg.get("kit")})
         elif not kk.get("set"):
             kk.update({"set": True, "previous": None})
@@ -1327,7 +1357,7 @@ class Mothership:
                 probs.append("Frugal-Bridge check (base): " + " | ".join(out.splitlines()[1:4]))
         reg = frugal_reg()
         if frugal and reg is not None:
-            rc, out = self.py(self.fbk / "kit" / "setup.py", "check", "--global", check=False)
+            rc, out = self.py(self.global_kit(own)[0] / "kit" / "setup.py", "check", "--global", check=False)
             if rc:
                 probs.append("Frugal-Bridge check --global: " + " | ".join(out.splitlines()[1:4]))
             if not reg.get("base") or Path(reg["base"]).resolve() != base.resolve():

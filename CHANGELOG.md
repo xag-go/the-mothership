@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.2.5 (2026-11-13)
+
+- `update` refreshes the user-level Frugal-Bridge install: it re-runs `install --global --hosts auto` every time instead
+  of skipping it as "already installed; re-run by connect" (connect only adds tools that are new since its last run; it
+  never refreshed the hook script or the hooks of tools already connected). The kit is the user's own (global.json
+  `kit`, e.g. a developer checkout) only when its Frugal `RELEASE` is newer than the vendored one; a stale checkout with
+  the same or no RELEASE gets the vendored kit. The output names the kit and release used. An own kit that is not used
+  keeps its `kit` path in global.json.
+- Frugal-Bridge vendored at release 2.42 (`7e212b2`, was `1180c57`): the CORE rule that a tool's built-in product
+  identity is not a role or a name, and `RELEASE = "2.42"` (the number compared; `VERSION` stays the rules-block marker).
+- A user's own kit path in global.json is no longer replaced by the payload path on a later update.
+- Skeleton Base 1.6.4 (`d424d7f`) unchanged.
+
 ## v1.2.4 (2026-11-13)
 
 - Frugal-Bridge `1180c57` vendored (was `b5d9998`): Codex usage is logged on `Stop` from the rollout's
