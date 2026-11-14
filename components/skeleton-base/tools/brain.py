@@ -175,7 +175,7 @@ import time
 import urllib.parse
 
 VERSION = "1"
-RELEASE = "1.7.4"        # product release (CHANGELOG); recorded in .kits.json so installers never downgrade
+RELEASE = "1.7.5"        # product release (CHANGELOG); recorded in .kits.json so installers never downgrade
 SRC = pathlib.Path(__file__).resolve().parent.parent          # the skeleton this script came with
 START = f"<!-- base-folder:start v{VERSION} -->"
 END = "<!-- base-folder:end -->"
@@ -2163,6 +2163,45 @@ def home_dir():
     return pathlib.Path(os.environ.get("HOME") or pathlib.Path.home())
 
 
+# a tool's home variable that names a folder outside the HOME a connect/disconnect runs for (1.7.5): the run would
+# write there. Allowed: under that HOME, under the base being connected, or a dir recorded for that tool (--tool-dir,
+# the connect record, the shared registry). Frugal-Bridge's FRUGAL_HOME is refused only when its global.json names
+# another base. Otherwise refused, unless --tool-dir names that tool or --allow-outside-home is given.
+TOOL_HOME_VARS = {"CLAUDE_CONFIG_DIR": ".claude", "CODEX_HOME": ".codex", "HERMES_HOME": ".hermes",
+                  "GEMINI_CLI_HOME": ".gemini", "COPILOT_HOME": ".copilot", "OPENCLAW_STATE_DIR": ".openclaw",
+                  "OPENCLAW_HOME": ".openclaw", "FRUGAL_HOME": None}
+
+
+def recorded_tool_dirs(base, home):
+    """[(tool key, dir)] that connect recorded for this base (--tool-dir) and in the shared registry (1.7.5)."""
+    rec = connect_rec(base)
+    out = [(k, d) for k, ds in (rec.get("dirs") or {}).items() for d in ds]
+    return out + [(k, d) for k, d, _ in registered_dirs(home, [])]
+
+
+def outside_home_check(home, base, cmd, exempt=()):
+    """SystemExit when a tool home variable in the environment points somewhere that is neither under HOME, nor under
+    the base, nor a dir recorded for that tool. EXEMPT: tool keys named with --tool-dir."""
+    home = pathlib.Path(home).resolve()
+    recorded = recorded_tool_dirs(base, home)
+    for var, key in TOOL_HOME_VARS.items():
+        v = os.environ.get(var)
+        if not v:
+            continue
+        p = os.path.expanduser(v)
+        if in_dir(p, home) or in_dir(p, base):
+            continue
+        if key is None:                               # Frugal-Bridge's home: refused only when it belongs to another base
+            reg = frugal_reg(home)
+            if reg is None or not reg.get("base") or same_dir(reg.get("base"), base):
+                continue
+        if key is not None and (key in exempt or any(k == key and in_dir(p, d) for k, d in recorded)):
+            continue
+        raise SystemExit(f"{cmd}: {var}={v} points outside HOME ({home}) and outside this base, so this run would "
+                         "write there. Run it with `env -i HOME=<home> PATH=/usr/bin:/bin ...`, unset the variable, "
+                         "pass --tool-dir for that tool, or add --allow-outside-home.")
+
+
 # ---------------------------------------------------------------- where each AI tool really keeps its files
 # Paths in this file are written as each tool's DEFAULT home-relative path (".claude/CLAUDE.md"). A tool's dir can
 # live anywhere (e.g. BASE/engines/<tool>/) when the tool's OWN setting points there: tool_path() maps the default
@@ -3860,6 +3899,11 @@ def kick_cmd(base):
             " || true")
 
 
+def workdir_line(base):
+    """WorkingDirectory= for a unit connect writes: the base (1.7.5; a user unit without one starts in HOME)."""
+    return "WorkingDirectory=" + str(base).replace("%", "%%") + "\n"
+
+
 def unit_esc(s):
     """One ExecStart= word for a systemd unit file: specifiers (%) and variables ($) doubled, backslashes and
     quotes escaped, the word double-quoted when it has a space or a quote. A plain path stays as it is."""
@@ -3874,7 +3918,7 @@ def unit_esc(s):
 
 def unit_texts(base):
     service = (f"[Unit]\nDescription=Skeleton Base: copy new tool memories into the base inbox\n\n"
-               f"[Service]\nType=oneshot\nExecStart=/usr/bin/env python3 {unit_esc(base / 'tools' / 'brain.py')} "
+               f"[Service]\nType=oneshot\n{workdir_line(base)}ExecStart=/usr/bin/env python3 {unit_esc(base / 'tools' / 'brain.py')} "
                f"collect --base {unit_esc(base)} --quiet\n")
     timer = (f"[Unit]\nDescription=Skeleton Base: daily memory collect\n\n"
              f"[Timer]\nOnBootSec=10min\nOnCalendar=daily\nPersistent=true\nUnit={UNIT}.service\n\n"
@@ -3885,7 +3929,7 @@ def unit_texts(base):
 def tidy_unit_texts(base):
     """The tidy check every 6 hours: free when nothing is due (no model is called then)."""
     service = (f"[Unit]\nDescription=Skeleton Base: merge filed memories into pages when due (rare LLM pass)\n\n"
-               f"[Service]\nType=oneshot\nExecStart=/usr/bin/env python3 {unit_esc(base / 'tools' / 'brain.py')} "
+               f"[Service]\nType=oneshot\n{workdir_line(base)}ExecStart=/usr/bin/env python3 {unit_esc(base / 'tools' / 'brain.py')} "
                f"tidy --base {unit_esc(base)} --quiet\nTimeoutStartSec=3h\nNice=10\n")
     timer = (f"[Unit]\nDescription=Skeleton Base: tidy check every 6 hours\n\n"
              f"[Timer]\nOnBootSec=20min\nOnCalendar=*-*-* 00/6:00:00\nRandomizedDelaySec=15min\nPersistent=true\n"
@@ -3895,7 +3939,7 @@ def tidy_unit_texts(base):
 
 def watch_unit_texts(base):
     service = (f"[Unit]\nDescription=Skeleton Base: instant memory watcher (collect, index, map, auto-connect)\n\n"
-               f"[Service]\nType=simple\nExecStart=/usr/bin/env python3 -S {unit_esc(base / 'tools' / 'brain.py')} "
+               f"[Service]\nType=simple\n{workdir_line(base)}ExecStart=/usr/bin/env python3 -S {unit_esc(base / 'tools' / 'brain.py')} "
                f"watch --base {unit_esc(base)}\nRestart=on-failure\nRestartSec=10\nMemoryMax=160M\nNice=10\n\n"
                f"[Install]\nWantedBy=default.target\n")
     return {f".config/systemd/user/{WATCH_UNIT}.service": service}
@@ -4895,7 +4939,7 @@ class Connector:
 
     def backup(self, r):
         """Copy HOME/r into BASE/.brain/backups/connect-TIME/ before it changes; return its base-relative path."""
-        src = self.home / r
+        src = self.place(r)
         if not src.is_file():
             return None
         if not self.bdir:
@@ -4905,12 +4949,22 @@ class Connector:
         shutil.copy2(src, dst)
         return rel(dst, self.base)
 
+    def place(self, rel):
+        """Where a connect record's file is: a unit file goes to ops/systemd once units are pinned (1.7.5)."""
+        if rel.startswith(UNIT_HOME + "/") and rel.endswith(UNIT_SUFFIX) and units_pinned(self.base):
+            return self.base / UNIT_OPS / pathlib.PurePosixPath(rel).name
+        return self.home / rel
+
     def put(self, r, text):
-        if read(self.home / r) == text:
+        q = self.place(r)
+        if q != self.home / r and (self.home / r).is_symlink():
+            (self.home / r).unlink()
+            self.log.append(f"{tool_tilde(r)}: link removed (the unit lives in {UNIT_OPS})")
+        if read(q) == text:
             return False
         self.backup(r)
-        write(self.home / r, text)
-        self.log.append(f"wrote {tool_tilde(r)}")
+        write(q, text)
+        self.log.append(f"wrote {tool_tilde(r)}" if q == self.home / r else f"wrote {UNIT_OPS}/{q.name}")
         return True
 
     def missing_dirs(self, r):
@@ -5059,6 +5113,7 @@ class Connector:
             if want:
                 self.log.append("pre-set for tools not installed yet (their first run makes their folder in the "
                                 "base): " + ", ".join(f"{v}" for _, v in sorted(want.items())))
+        write_start_block(self.base, self.home, self.log)   # after the engines block: disconnect takes it out first
         me["connect"] = {key: v for key, v in rec.items() if v}
         self.record_base_files(me)
         self.save_kits(k)
@@ -6081,6 +6136,7 @@ class Connector:
         if rec.get("sha") == sha(text):
             return                                    # nothing new since the last import
         done = set(rec.get("lines", []))
+        raw = dict(rec.get("raw") or {})                  # key -> the line as Frugal-Bridge wrote it (1.7.5)
         slot = self.user_slot(k)
         pages, review, counts = {}, [], {"filled": 0, "added": 0}
         for key, label, value in frugal_user_lines(text):
@@ -6101,6 +6157,7 @@ class Connector:
             else:
                 review.append((what, r, line, shown))
             done.add(key)
+            raw[key] = f"- {label}: {value}" if label else f"- {value}"
         changed = {r: touch_frontmatter(t, FRUGAL_SRC_NAME) for r, t in pages.items() if t != read(self.base / r)}
         card = None
         if changed or review:
@@ -6117,7 +6174,8 @@ class Connector:
             if review:
                 card = self.review_card(user, slot, review)
                 rec["review"] = card
-        rec.update({"file": str(user), "sha": sha(text), "lines": sorted(done), "last": today()})
+        rec.update({"file": str(user), "sha": sha(text), "lines": sorted(done), "last": today(),
+                    "raw": {x: raw[x] for x in sorted(done) if x in raw}})
         rec.setdefault("first", today())
         me["frugal_user"] = rec
         self.save_kits(k)
@@ -6147,7 +6205,9 @@ class Connector:
         write(p, old.rstrip("\n") + "\n" + "\n".join(lines) + "\n")
         return r
 
-    def frugal_export_text(self, old):
+    def frugal_export_text(self, old, known=None):
+        """USER.md text for Frugal-Bridge. KNOWN is the connect record's frugal_user (1.7.5): the lines it holds that
+        the base pages do not say are kept under their own heading, so an export never comes out as a blank form."""
         slot = self.user_slot()
         files = sorted((self.base / slot).glob("*.md")) if slot.endswith("/") else [self.base / slot]
         texts = {f: read(f) or "" for f in files if f.is_file()}
@@ -6186,6 +6246,21 @@ class Connector:
                 keep.append(s if s.startswith(("-", "*")) else f"- {s}")
             if keep:
                 out += ["", f"## {fm.get('title') or f.stem} (from the base: {rel(f, self.base)})"] + keep
+        known = known or {}
+        have = {k for k, _, _ in frugal_user_lines("\n".join(out))}
+        kept = []
+        for k in known.get("lines", []):
+            if k in have:
+                continue
+            line = (known.get("raw") or {}).get(k) or f"- {k}"
+            m = LABEL_LINE.match(line.strip())
+            i = next((i for i, x in enumerate(out) if m and x == f"- {m.group(1).strip()}:"), None)
+            if i is not None:                         # the blank form line of that label gets the owner's value
+                out[i] = line
+            else:
+                kept.append(line)
+        if kept:
+            out += ["", "## Kept from Frugal-Bridge USER.md (not on the base pages)"] + kept
         return "\n".join(out) + "\n"
 
     def frugal_give_back(self):
@@ -6194,7 +6269,8 @@ class Connector:
             return
         user = frugal_home(self.home) / "USER.md"
         old = read(user)
-        text = self.frugal_export_text(old)
+        k0 = self.kits()
+        text = self.frugal_export_text(old, (k0.get("kits", {}).get("base-folder", {}).get("frugal_user")))
         if old != text:
             if old is not None:
                 bd = frugal_home(self.home) / "backup" / f"skeleton-base-{dt.datetime.now():%Y%m%d-%H%M%S-%f}"
@@ -6208,6 +6284,8 @@ class Connector:
         if me is not None:                            # what we wrote is known: a later connect imports none of it
             rec = dict(me.get("frugal_user") or {})
             rec["lines"] = sorted(set(rec.get("lines", [])) | {x[0] for x in frugal_user_lines(text)})
+            rec["raw"] = {**(rec.get("raw") or {}), **{x[0]: f"- {x[1]}: {x[2]}" if x[1] else f"- {x[2]}"
+                                                       for x in frugal_user_lines(text)}}
             rec.update({"file": str(user), "sha": sha(text), "exported": today()})
             me["frugal_user"] = rec
             self.save_kits(k)
@@ -6256,7 +6334,7 @@ class Connector:
         for r, t in (list(rec.get("timer", {}).items()) + list(rec.get("watch", {}).items())
                      + list(rec.get("pointer", {}).items()) + list(rec.get("skills", {}).items())
                      + list(rec.get("registry", {}).items())):
-            p = self.home / r
+            p = self.place(r)
             dirs |= set(t.get("dirs", []))
             if p.is_file() and sha(p.read_bytes()) == t.get("sha"):
                 if t.get("previous"):
@@ -6265,6 +6343,7 @@ class Connector:
                     p.unlink(); self.log.append(f"removed {tool_tilde(r)}")
             elif p.exists():
                 self.log.append(f"kept {tool_tilde(r)} (changed since connect)")
+        write_start_block(self.base, self.home, self.log, want=False)
         reg = reg_load(self.base, ENGINES_REG)
         if reg.pop("preset", None) is not None:          # the variables pre-set for absent tools go
             for x in reg_load(self.base, ENV_STORE).values():
@@ -9641,6 +9720,55 @@ def write_env_files(base, reg, home, log):
         (pathlib.Path(base) / ENV_STORE).unlink()
 
 
+START_IN_BASE = ".brain/start-in-base.json"          # {"off": true} once the owner turned it off (1.7.5)
+START_FILES = (".profile", ".bashrc")                # logins and shells: only the ones that are there get the block
+SHELL_START, SHELL_END = "# skeleton-base start-in-base:start", "# skeleton-base start-in-base:end"
+
+
+def start_in_base_on(base):
+    return not reg_load(base, START_IN_BASE).get("off")
+
+
+def set_start_in_base(base, on):
+    """connect --start-in-base / --no-start-in-base: the owner's setting (a local file; absent = on)."""
+    p = pathlib.Path(base) / START_IN_BASE
+    if on:
+        if p.is_file():
+            p.unlink()
+    else:
+        reg_save(base, START_IN_BASE, {"off": True})
+
+
+def start_block(base):
+    return (f"{SHELL_START}\n"
+            "# an interactive shell that starts in $HOME goes to the base (connect --no-start-in-base turns it off)\n"
+            f"case $- in *i*) [ \"$PWD\" = \"$HOME\" ] && cd {shlex.quote(str(base))} || true ;; esac\n"
+            f"{SHELL_END}")
+
+
+def write_start_block(base, home, log, want=None):
+    """connect's start-in-base block at the end of ~/.profile and ~/.bashrc (1.7.5), on unless the owner turned it
+    off. Only a shell file that is already there is touched (connect never makes one). WANT=False (disconnect)
+    takes the block out again: the file is then the bytes it had before, since the block was only appended."""
+    on = start_in_base_on(base) if want is None else want
+    blk = re.compile(re.escape(SHELL_START) + r".*?" + re.escape(SHELL_END) + r"\n?", re.S)
+    for r in START_FILES:
+        p = pathlib.Path(home) / r
+        cur = read(p)
+        if cur is None:
+            continue
+        if not on:
+            new = blk.sub("", cur)
+        else:
+            block = start_block(base) + "\n"
+            if blk.search(cur):
+                new = blk.sub(lambda m: block, cur, count=1)
+            else:
+                new = cur + ("" if not cur or cur.endswith("\n") else "\n") + block
+        if new != cur:
+            write(p, new)
+            log.append(f"wrote ~/{r} (start in the base)" if on else f"removed the start-in-base block from ~/{r}")
+
 def rekey(obj, pairs):
     """Rename recorded paths (connect's records) after a tool dir moved: keys and string values."""
     def one(v):
@@ -10056,14 +10184,27 @@ def units_unitpath():
     return v.split("=", 1)[1].split() if r.returncode == 0 and v.startswith("UnitPath=") else None
 
 
+def connect_unit_names(base):
+    """File names of the units connect wrote for this base (its watch and timer records; 1.7.5)."""
+    return {pathlib.PurePosixPath(r).name for st in ("watch", "timer")
+            for r in (connect_rec(base).get(st) or {}) if r.startswith(UNIT_HOME + "/")}
+
+
+def units_pinned(base):
+    return bool(reg_load(base, ENGINES_REG).get("units_pinned"))
+
+
 def units_pin(base, undo=False):
     """P3: units live in BASE/ops/systemd; the user manager is told the place by SYSTEMD_UNIT_PATH (a root drop-in
     for user@.service, written once by the owner: printed here). Only once `systemctl --user show -p UnitPath`
     lists ops/systemd do the links in ~/.config/systemd/user go; the enable links (*.wants) are pointed at the unit
-    file in ops/systemd (systemctl enable makes them point at the unit file it found on the search path)."""
+    file in ops/systemd (systemctl enable makes them point at the unit file it found on the search path).
+    1.7.5: the units connect wrote for this base join: their links go, a real file moves into ops/systemd, and
+    connect writes them there from then on (no link)."""
     base, home, log = pathlib.Path(base).resolve(), home_dir(), []
     reg = reg_load(base, ENGINES_REG)
     units = reg.get("units") if isinstance(reg.get("units"), dict) else {}
+    mine = connect_unit_names(base)
     ud, ops = pathlib.Path(home) / UNIT_HOME, base / UNIT_OPS
     dropin = "/" + UNITS_DROPIN
     body = f'[Service]\nEnvironment="SYSTEMD_UNIT_PATH={ops}:"\n'
@@ -10071,13 +10212,16 @@ def units_pin(base, undo=False):
         for n in sorted(units):
             if (ops / n).exists() and not os.path.lexists(ud / n):
                 os.symlink(str(ops / n), ud / n); log.append(f"~/{UNIT_HOME}/{n}: the link is back")
+        for n in sorted(mine):
+            if (ops / n).is_file() and not os.path.lexists(ud / n):
+                os.replace(ops / n, ud / n); log.append(f"~/{UNIT_HOME}/{n}: a real file again")
         reg.pop("units_pinned", None)
         reg_save(base, ENGINES_REG, reg)
         systemctl_reload(log)
         log.append(f"then, as root (one time): sudo rm {shq(dropin)} && sudo systemctl daemon-reload; the user "
                    "manager drops the path at its next start (log out of every session and back in)")
         return log
-    if not units:
+    if not units and not mine:
         return ["engine pin-units: no units moved yet (engine adopt-units first)"]
     up = units_unitpath()
     if up is None or str(ops) not in up:
@@ -10090,13 +10234,16 @@ def units_pin(base, undo=False):
                 "':' keeps the default search path (systemd.unit(5), \"Unit File Load Path\").",
                 "Then run `brain.py engine pin-units` again: it checks `systemctl --user show -p UnitPath` and only "
                 "then removes the links."]
-    for n in sorted(units):
+    for n in sorted(set(units) | mine):
         p = ud / n
         if p.is_symlink() and os.path.realpath(p) == os.path.realpath(ops / n):
             os.unlink(p); log.append(f"~/{UNIT_HOME}/{n}: link removed (found in {ops} now)")
+        elif n in mine and p.is_file() and not p.is_symlink():
+            ops.mkdir(parents=True, exist_ok=True)
+            os.replace(p, ops / n); log.append(f"~/{UNIT_HOME}/{n}: moved into {ops} (connect writes it there now)")
     for w in sorted(ud.glob("*.wants")) + sorted(ud.glob("*.requires")):
         for x in sorted(w.iterdir()):
-            if x.is_symlink() and x.name in units:
+            if x.is_symlink() and (x.name in units or x.name in mine):
                 t = os.path.normpath(os.path.join(str(w), os.readlink(x)))
                 if t == os.path.normpath(str(ud / x.name)) or not os.path.exists(x):
                     os.unlink(x); os.symlink(str(ops / x.name), x)
@@ -10111,13 +10258,45 @@ def units_pinned_rows(base, home):
     reg = reg_load(base, ENGINES_REG)
     if not reg.get("units_pinned"):
         return []
-    ud, rows = pathlib.Path(home) / UNIT_HOME, []
-    for n in sorted(reg.get("units") or {}):
+    ud, rows, units = pathlib.Path(home) / UNIT_HOME, [], reg.get("units") or {}
+    for n in sorted(set(units) | connect_unit_names(base)):
         p = ud / n
-        if os.path.lexists(p):
-            rows.append(("ERROR", f"~/{UNIT_HOME}/{n}: pinned to {UNIT_OPS} (found through SYSTEMD_UNIT_PATH), but "
-                                  f"{'a link' if p.is_symlink() else 'a real file'} is there -> brain.py watch adopts "
-                                  "it again (or: brain.py engine adopt-units)"))
+        if not os.path.lexists(p):
+            continue
+        if n not in units:              # connect's own unit: it is written into ops/systemd (1.7.5)
+            what = f"a link into {UNIT_OPS}" if p.is_symlink() else "a real file"
+            rows.append(("WARN", f"~/{UNIT_HOME}/{n}: {what} while units are pinned -> brain.py engine pin-units"))
+            continue
+        rows.append(("ERROR", f"~/{UNIT_HOME}/{n}: pinned to {UNIT_OPS} (found through SYSTEMD_UNIT_PATH), but "
+                              f"{'a link' if p.is_symlink() else 'a real file'} is there -> brain.py watch adopts "
+                              "it again (or: brain.py engine adopt-units)"))
+    return rows
+
+
+def unit_workdir_rows(base, home):
+    """1.7.5: the services in ops/systemd and in ~/.config/systemd/user (one row per name). A WorkingDirectory= outside
+    the base is WARN; so is none at all (a user unit then starts in the home folder)."""
+    base, home, seen, rows = pathlib.Path(base).resolve(), pathlib.Path(home), {}, []
+    for d, label in ((base / UNIT_OPS, UNIT_OPS), (home / UNIT_HOME, f"~/{UNIT_HOME}")):
+        if not d.is_dir():
+            continue
+        for p in sorted(d.iterdir()):
+            if p.is_dir() or not p.name.endswith(".service") or p.name in seen:
+                continue
+            seen[p.name] = (p, f"{label}/{p.name}")
+    for n in sorted(seen):
+        p, label = seen[n]
+        wd = None
+        for line in (read(p) or "").splitlines():
+            k, _, v = line.strip().partition("=")
+            if k == "WorkingDirectory":
+                wd = v.strip().lstrip("-") or None
+        if wd is None:
+            rows.append(("WARN", f"{label}: no WorkingDirectory= (a user unit starts in the home folder) -> set "
+                                 f"WorkingDirectory={base} (or the tool's engine folder)"))
+        elif not in_dir(os.path.expanduser(wd.replace("%h", str(home))), base):
+            rows.append(("WARN", f"{label}: starts outside the base (WorkingDirectory={wd}) -> set "
+                                 f"WorkingDirectory={base} (or the tool's engine folder)"))
     return rows
 
 
@@ -11463,6 +11642,7 @@ def doctor(base, strict=False):
     rows += link_rows(base, home)
     rows += pinned_rows(base, home)
     rows += units_pinned_rows(base, home)
+    rows += unit_workdir_rows(base, home)
     for key, d in tool_dirs(home, base):
         rules, mem = ai_signals(d)
         if (rules or mem) and os.path.normpath(str(d)) not in mirrors and not in_dir(d, base):
@@ -11615,8 +11795,10 @@ def main(argv):
                   "watch": ("--add", "--source", "--match", "--depth", "--remove", "--days", "--quiet-s", "--max-s",
                             "--rescan-s", "--poll-s", "--log", "--for-s")}[cmd] + ("--base",)
         flags = {"collect": ("--baseline", "--quiet", "--no-file"), "connect": ("--timer", "--watch", "--kick", "--print",
-                                                                   "--mcp", "--matrix"),
-                 "disconnect": (), "watch": ("--once", "--list", "--discover", "--poll", "--no-commit",
+                                                                   "--mcp", "--matrix",
+                                                                   "--no-start-in-base", "--start-in-base",
+                                                                   "--allow-outside-home"),
+                 "disconnect": ("--allow-outside-home",), "watch": ("--once", "--list", "--discover", "--poll", "--no-commit",
                                              "--no-connect")}[cmd]
         tdirs = []
         while i < len(args):
@@ -11635,6 +11817,8 @@ def main(argv):
             else:
                 print(f"{cmd}: unknown argument {a}\n" + __doc__); return 1
         base = pathlib.Path(opts.get("--base") or SRC).expanduser().resolve()
+        if cmd in ("connect", "disconnect") and not opts.get("--allow-outside-home"):
+            outside_home_check(home_dir(), base, cmd, exempt=[k for k, _ in tdirs])
         if cmd == "watch":
             return watch_main(base, opts)
         if cmd == "connect" and opts.get("--print"):
@@ -11653,6 +11837,8 @@ def main(argv):
             only = [s.strip() for s in opts["--only"].split(",") if s.strip()] if "--only" in opts else None
             return collect(base, only, bool(opts.get("--baseline")), since, bool(opts.get("--quiet")),
                            not opts.get("--no-file"))
+        if cmd == "connect" and ("--no-start-in-base" in opts or "--start-in-base" in opts):
+            set_start_in_base(base, "--start-in-base" in opts)
         c = Connector(base)
         log = c.connect(bool(opts.get("--timer")), bool(opts.get("--watch")), bool(opts.get("--kick")),
                         mcp=bool(opts.get("--mcp")), tool_dirs_opt=tdirs) \

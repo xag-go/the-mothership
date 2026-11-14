@@ -2,6 +2,24 @@
 
 Changes to the skeleton structure and tools (not to anyone's content).
 
+## v1.7.5 - 2026-11-14
+- Start in the base: connect writes a marked block into ~/.profile and ~/.bashrc. In an interactive shell that
+  starts in $HOME it `cd`s into the base; other shells (scripts, `ssh host cmd`, a shell started elsewhere) are not
+  touched. Off with `connect --no-start-in-base` (on again: `connect --start-in-base`); disconnect removes the block.
+- Units: `engine pin-units` also takes the units connect wrote (watch, collect, tidy): their links in
+  ~/.config/systemd/user go, a real file moves into ops/systemd, and connect/watch write them there with no link
+  once pinned. Doctor WARNs about a link or a real file of those units left in ~/.config/systemd/user.
+- Units start in the base: connect's service units set `WorkingDirectory=` to the base. Doctor WARNs about every
+  service in ops/systemd and ~/.config/systemd/user whose WorkingDirectory= is outside the base or missing (a user
+  unit without one starts in the home folder); the fix is printed with it. Timers are not checked.
+- Frugal-Bridge export on disconnect keeps the owner's lines: the lines the connect record holds (and their text)
+  are written back into USER.md under their own heading, or into the blank form line of their label; an export is
+  never only the blank form while the base knows lines.
+- connect and disconnect refuse a tool home variable (CLAUDE_CONFIG_DIR, CODEX_HOME, HERMES_HOME, GEMINI_CLI_HOME,
+  COPILOT_HOME, OPENCLAW_STATE_DIR, FRUGAL_HOME) that points outside the HOME they run for and outside the base,
+  unless a dir recorded for that tool (--tool-dir, connect record, shared registry) covers it, or --tool-dir names
+  that tool, or --allow-outside-home is given. FRUGAL_HOME is refused only when its global.json names another base.
+
 ## v1.7.4 - 2026-11-14
 - tidy: watch-owned registry files (engines.json, projects.json, .kits.json, .mothership.json) rewritten during a page
   run are no conflict any more (was "changed engines.json": 2 of 3 runs failed).

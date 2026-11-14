@@ -22,7 +22,8 @@ from unittest import mock
 REPO = pathlib.Path(__file__).resolve().parent.parent
 BRAIN = REPO / "tools" / "brain.py"
 # tests must never read the real tool homes: drop them (a test that needs one sets it itself)
-for _v in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME", "FRUGAL_HOME"):
+for _v in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "HERMES_HOME", "FRUGAL_HOME", "GEMINI_CLI_HOME", "COPILOT_HOME",
+           "OPENCLAW_STATE_DIR", "OPENCLAW_HOME"):      # the live environment never steers a test (1.7.5)
     os.environ.pop(_v, None)
 
 FRUGAL_SRC = pathlib.Path(os.environ.get("FRUGAL_BRIDGE_SRC") or os.path.expanduser("~/frugal-bridge"))
@@ -2001,7 +2002,7 @@ FAKE_USER = ("# USER.md — who the user is and how they want answers\n\n"
              "- Name: Alex Example\n"
              "Likes plain files.\n")
 SCRUB = ("HERMES_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "BRAIN_ROOT", "FRUGAL_BRIDGE_KIT", "FRUGAL_BASE",
-         "HERMES_AGENT")
+         "HERMES_AGENT", "GEMINI_CLI_HOME", "COPILOT_HOME", "OPENCLAW_STATE_DIR", "OPENCLAW_HOME")
 
 
 @unittest.skipUnless(HAVE_FRUGAL, "Frugal-Bridge checkout not found (set FRUGAL_BRIDGE_SRC)")
@@ -3966,7 +3967,7 @@ class EverythingInBaseTests(ToolHome):
         self.write(cx, "config.toml", 'model = "x"\n')
         before = tree(self.tmp)
         env = {"CLAUDE_CONFIG_DIR": str(cl), "CODEX_HOME": str(cx)}
-        r = self.hb("connect", "--mcp", env=env)
+        r = self.hb("connect", "--mcp", "--allow-outside-home", env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertFalse((self.home / ".claude").exists())
         self.assertFalse((self.home / ".claude.json").exists())
@@ -3978,7 +3979,7 @@ class EverythingInBaseTests(ToolHome):
         self.assertIn("SessionEnd", s["hooks"])
         self.assertIn(str(self.base), (cx / "config.toml").read_text())
         self.assertTrue((cx / "AGENTS.md").is_file())
-        r = self.hb("disconnect", env=env)
+        r = self.hb("disconnect", "--allow-outside-home", env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         after = {k: v for k, v in tree(self.tmp).items() if not k.startswith("base/.brain/backups")}
         self.assertEqual({k: v for k, v in after.items() if not k.startswith("base/")},
@@ -6033,7 +6034,7 @@ class SkillsPerToolTests(ToolHome):
         self.bins("codex")
         ch = self.base / "engines/codex"
         self.write(ch, "config.toml", 'model = "x"\n')
-        r = self.hb("connect", env={"CODEX_HOME": str(ch)})
+        r = self.hb("connect", "--allow-outside-home", env={"CODEX_HOME": str(ch)})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue((ch / "skills/base-home/SKILL.md").is_file())
         self.assertFalse(os.path.lexists(self.home / ".agents/skills"))
@@ -6272,6 +6273,148 @@ class UnitPinTests(ToolHome):
         r = self.ok("engine", "pin-units", "--undo", "--base", str(self.base))
         self.assertTrue((self.u / "team-a.service").is_symlink())
         self.assertIn("sudo rm", r.stdout)
+
+    def test_connect_units_go_into_ops_once_pinned_and_doctor_warns_on_a_link(self):
+        """1.7.5: connect's own units join the pin: no link in ~/.config/systemd/user, the file lives in ops/systemd."""
+        self.ok("connect", "--watch")
+        self.assertTrue((self.u / "skeleton-base-collect.service").is_file())
+        self.up.write_text(f"{self.ops} {self.home}/.config/systemd/user /usr/lib/systemd/user")
+        self.ok("engine", "pin-units", "--base", str(self.base))
+        self.assertTrue((self.ops / "skeleton-base-collect.service").is_file(), "moved into ops/systemd")
+        self.assertFalse(os.path.lexists(self.u / "skeleton-base-collect.service"))
+        self.ok("connect", "--watch")                              # connect writes straight into ops/systemd
+        self.assertFalse(os.path.lexists(self.u / "skeleton-base-collect.service"), "no link comes back")
+        self.assertIn(f"WorkingDirectory={self.base}", (self.ops / "skeleton-base-collect.service").read_text())
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertNotRegex(out, r"WARN\s+.*skeleton-base-(collect|watch|tidy)")
+        (self.u / "skeleton-base-collect.service").symlink_to(self.ops / "skeleton-base-collect.service")
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertRegex(out, r"WARN\s+~/\.config/systemd/user/skeleton-base-collect\.service: a link .*pin-units")
+        self.ok("disconnect")
+        self.assertFalse((self.ops / "skeleton-base-collect.service").exists(), "disconnect removes the unit")
+        self.ok("engine", "pin-units", "--undo", "--base", str(self.base))
+
+
+class StartInBaseTests(ToolHome):
+    """1.7.5: a shell that starts in $HOME goes into the base (interactive shells only); the owner can turn it off."""
+
+    BLOCK = "# skeleton-base start-in-base:start"
+
+    def setUp(self):
+        super().setUp()
+        self.write(self.home, ".profile", "export KEEP=1\n")
+        self.write(self.home, ".bashrc", "alias ll='ls -l'\n")
+
+    def rc(self, name):
+        p = self.home / name
+        return p.read_text() if p.is_file() else ""
+
+    def test_block_in_profile_and_bashrc_and_disconnect_takes_it_out(self):
+        self.ok("connect")
+        for f in (".profile", ".bashrc"):
+            self.assertIn(self.BLOCK, self.rc(f), f)
+            self.assertIn(f"cd {self.base}", self.rc(f), f)
+        self.ok("disconnect")
+        self.assertEqual(self.rc(".profile"), "export KEEP=1\n")
+        self.assertEqual(self.rc(".bashrc"), "alias ll='ls -l'\n")
+
+    def test_no_start_in_base_turns_it_off_and_back_on(self):
+        self.ok("connect", "--no-start-in-base")
+        self.assertNotIn(self.BLOCK, self.rc(".bashrc"))
+        self.ok("connect")                                         # the setting is kept
+        self.assertNotIn(self.BLOCK, self.rc(".bashrc"))
+        self.ok("connect", "--start-in-base")
+        self.assertIn(self.BLOCK, self.rc(".bashrc"))
+
+    def shell(self, cwd, *args):
+        home = os.path.realpath(self.home)
+        env = {"HOME": home, "PATH": "/usr/bin:/bin", "TERM": "dumb"}
+        return subprocess.run(["bash", *args, "pwd"], cwd=cwd, env=env, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=60).stdout.strip()
+
+    def test_interactive_shell_from_home_goes_to_base_only_then(self):
+        self.ok("connect")
+        home = os.path.realpath(self.home)
+        self.assertEqual(self.shell(home, "-i", "-c"), os.path.realpath(self.base))
+        self.assertEqual(self.shell(self.tmp, "-i", "-c"), os.path.realpath(self.tmp), "started elsewhere: stays")
+        self.assertEqual(self.shell(home, "-c"), home, "not interactive: stays")
+        self.ok("connect", "--no-start-in-base")
+        self.assertEqual(self.shell(home, "-i", "-c"), home, "turned off: stays")
+
+    def test_doctor_warns_on_a_working_directory_outside_the_base(self):
+        self.write(self.home, ".config/systemd/user/team-x.service",
+                   "[Service]\nWorkingDirectory=%h\nExecStart=/bin/true\n")
+        self.ok("connect", "--timer")
+        unit = self.home / ".config/systemd/user/skeleton-base-collect.service"
+        self.assertIn(f"WorkingDirectory={self.base}", unit.read_text())
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertRegex(out, r"WARN\s+~/\.config/systemd/user/team-x\.service: starts outside the base \(WorkingDirectory=%h\)")
+        self.assertNotRegex(out, r"WARN\s+.*skeleton-base-collect")
+
+
+class FrugalKeptLinesTests(HomeBase):
+    """1.7.5: an export never comes out as Frugal-Bridge's blank form while the base remembers the owner's lines."""
+
+    def brain_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("brain_under_test", BRAIN)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_recorded_lines_are_written_back_when_the_base_pages_are_blank(self):
+        m = self.brain_module()
+        c = m.Connector(self.base)
+        key = m.norm("Language and script: Spanish")
+        known = {"lines": [key, m.norm("the owner likes plain files.")],
+                 "raw": {key: "- Language and script: Spanish"}}
+        text = c.frugal_export_text(None, known)
+        self.assertIn("- Language and script: Spanish\n", text)
+        self.assertNotIn("- Language and script:\n", text, "the blank form line is filled, not repeated")
+        self.assertIn("## Kept from Frugal-Bridge USER.md", text)
+        self.assertIn("- the owner likes plain files.", text)
+        self.assertEqual({x[0] for x in m.frugal_user_lines(text)} & set(known["lines"]), set(known["lines"]))
+        blank = c.frugal_export_text(None, {})
+        self.assertNotIn("Kept from", blank)
+        self.assertIn("- Language and script:\n", blank)
+
+
+class OutsideHomeTests(ToolHome):
+    """1.7.5: a tool home variable that points outside the HOME the run is for is refused (a fake HOME must
+    never write the live base through the live environment)."""
+
+    def test_connect_and_disconnect_refuse_then_allow_with_the_flag(self):
+        live = self.tmp / "live" / "claude"
+        r = self.hb("connect", env={"CLAUDE_CONFIG_DIR": str(live)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("CLAUDE_CONFIG_DIR", r.stderr + r.stdout)
+        self.assertIn("points outside HOME", r.stderr + r.stdout)
+        self.assertFalse(live.exists())
+        self.assertFalse((self.home / ".claude.json").exists())
+        fh = self.tmp / "live" / "frugal"                    # a Frugal-Bridge home that belongs to another base
+        self.write(fh, "global.json", json.dumps({"base": str(self.tmp / "other-base")}))
+        r = self.hb("disconnect", env={"FRUGAL_HOME": str(fh)})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("FRUGAL_HOME", r.stderr + r.stdout)
+        r = self.hb("connect", "--allow-outside-home", env={"CLAUDE_CONFIG_DIR": str(live)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_home_under_the_base_or_recorded_for_that_tool_passes_without_the_flag(self):
+        under_base = self.base / "engines" / "claude"
+        self.assertEqual(self.hb("connect", env={"CLAUDE_CONFIG_DIR": str(under_base)}).returncode, 0)
+        other = self.tmp / "other-codex"
+        r = self.hb("connect", "--tool-dir", f"codex={other}", env={"CODEX_HOME": str(self.tmp / "x")})
+        self.assertNotIn("points outside HOME", r.stderr + r.stdout)
+        r = self.hb("connect", env={"CODEX_HOME": str(other)})          # recorded by the --tool-dir above
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("points outside HOME", r.stderr + r.stdout)
+
+    def test_a_tool_dir_for_that_tool_is_enough_and_inside_home_passes(self):
+        inside = self.home / ".claude"
+        self.assertEqual(self.hb("connect", env={"CLAUDE_CONFIG_DIR": str(inside)}).returncode, 0)
+        out = self.hb("connect", "--tool-dir", f"claude-code={self.tmp / 'x'}",
+                      env={"CLAUDE_CONFIG_DIR": str(self.tmp / "y")})
+        self.assertNotIn("points outside HOME", out.stderr + out.stdout)
 
 
 class PresetTests(ToolHome):

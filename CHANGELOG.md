@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.2.16 (2026-11-14)
+
+- Skeleton Base 1.7.5 `fc5b619`: everything starts in the base. Pinned units have no links left (connect writes its own
+  units into the base's unit folder); doctor warns on a service that starts outside the base; an interactive shell
+  opened in the home folder goes into the base (`connect --no-start-in-base` turns it off). connect and disconnect
+  refuse a tool home variable that points outside the HOME they run for; disconnect writes the owner's lines back to
+  Frugal-Bridge's user file, never a blank form.
+
 ## v1.2.15 (2026-11-14)
 
 - Skeleton Base 1.7.4 `7323b49`: the base review. Sync scope "notes" (the Mac gets notes, not code) as the default;
