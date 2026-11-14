@@ -494,6 +494,7 @@ class InstallTests(Base):
         mine = self.home / "my-brain"
         self.py(SB_VENDOR / "tools/brain.py", "init", mine, "--frugal=no")
         self.py(mine / "tools/brain.py", "connect", "--base", mine)
+        (mine / "wiki/projects").mkdir(parents=True, exist_ok=True)      # content folders come with their first page (1.7.4)
         (mine / "wiki/projects/garden.md").write_text(page_text("Garden", "Tomatoes."))
         self.py(mine / "tools/brain.py", "index", "--root", mine)
         out = self.ms("--yes")                               # no --base: finds the connected base
@@ -814,6 +815,7 @@ class UpdateUninstallTests(Base):
         self.assertIn("Robin Example", who.read_text())
         who.write_text(who.read_text() + "\n- Hobby: sailing\n")                  # user edits
         page = self.base / "wiki/projects/my-project.md"
+        page.parent.mkdir(parents=True, exist_ok=True)      # content folders come with their first page (1.7.4)
         page.write_text(page_text("My project", "Ship it."))
         self.py(self.base / "tools/brain.py", "index", "--root", self.base)
         mine = {p: p.read_bytes() for p in (who, page)}
@@ -845,7 +847,7 @@ class UpdateUninstallTests(Base):
         (self.home / ".codex/AGENTS.md").unlink()
         (self.base / "tools/brain.py").unlink()
         (self.base / "AGENTS.md").unlink()
-        shutil.rmtree(self.base / "wiki/people")
+        shutil.rmtree(self.base / "wiki/me")                              # a content folder init made
         out = self.ms("uninstall", rc=None)
         self.assertIn("uninstalled", out)
         self.assertEqual((self.home / ".claude/CLAUDE.md").read_text(), USER_CLAUDE)
@@ -856,6 +858,7 @@ class UpdateUninstallTests(Base):
     def test_uninstall_keeps_user_pages_and_purge_needs_confirmation(self):
         self.ms("--yes")
         page = self.base / "wiki/people/kim.md"
+        page.parent.mkdir(exist_ok=True)               # content folders are made with their first page (1.7.4)
         page.write_text(page_text("Kim", "Friend."))
         self.py(self.base / "tools/brain.py", "index", "--root", self.base)
         t_before = tree(self.home)
@@ -1057,6 +1060,8 @@ class LintWarningTests(Base):
     """Lint issues in your own pages are warnings, never an install failure."""
 
     def bad_pages(self, base):
+        for d in ("wiki/projects", "wiki/people"):
+            (base / d).mkdir(exist_ok=True)
         (base / "wiki/projects/no-front.md").write_text("# No frontmatter\n\nSee [[nowhere]].\n")
         (base / "wiki/people/Bad_Name.md").write_text(page_text("Bad", "x"))
 
@@ -1121,7 +1126,9 @@ def full_tree(d, skip=()):
 USER_RULES = "# My own rules\n\nAlways cite the page you used.\n\n"
 # what the products may remove or rewrite in the base on uninstall (their own files); everything else must stay
 CONNECT_COPIES = {"engines.json", "engines", "engines/agents-skills", ".brain/backups/engines-env.json"}   # made by connect inside the base
-PRODUCT_FILES = {".kits.json", ".mothership.json", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore",
+PRODUCT_FILES = {"wiki/glossary.md", "wiki/how-this-base-works.md", "wiki/sessions.md", "wiki/memories.md",
+                 "wiki/dashboard.md", "wiki/decisions-newest.base", "wiki/projects-by-status.base", "wiki/stale-pages.base",
+                 ".kits.json", ".mothership.json", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore",
                  ".claude/settings.json", ".gemini/settings.json", "maps/brain.html", ".brain/map.json",
                  ".brain/search.db", ".brain/collector.lock", ".brain/watch.lock", ".brain/kick"}
 
@@ -1158,6 +1165,8 @@ class KeepsYourDataTests(Base):
         self.git(b, "init", "-q", "-b", "main")
         self.git(b, "add", "-A")
         self.git(b, "commit", "-q", "-m", "one")
+        (b / "wiki/projects").mkdir(exist_ok=True)
+        (b / "wiki/people").mkdir(exist_ok=True)
         (b / "wiki/projects/garden.md").write_text(page_text("Garden", "Beans in May."))
         (b / "wiki/people/kim-example.md").write_text(page_text("Kim Example", "Neighbour."))
         (b / "raw/docs").mkdir(parents=True, exist_ok=True)
@@ -1229,7 +1238,7 @@ class KeepsYourDataTests(Base):
                 continue
             kit = [SB_VENDOR / rel, FB_VENDOR / "kit" / rel.replace(".claude/", "", 1)]
             same_kit = any(k.is_file() and hashlib.sha256(k.read_bytes()).hexdigest() == v[1] for k in kit)
-            self.assertTrue(rel in PRODUCT_FILES or rel in CONNECT_COPIES or same_kit
+            self.assertTrue(rel in PRODUCT_FILES or rel.startswith("wiki/weekly/") or rel in CONNECT_COPIES or same_kit
                             or rel.startswith((".frugal-bridge/", ".brain/backups/connect-", "engines/agents-skills/")),
                             f"removed or changed and not a kit file: {rel}")
         hook = ".git/hooks/pre-commit"                    # the base guard init wrote: a kit file, removed
@@ -1291,6 +1300,7 @@ class KeepsYourDataTests(Base):
 
     def test_no_backup_only_when_given(self):
         self.ms("--yes")
+        (self.base / "wiki/projects").mkdir(parents=True, exist_ok=True)      # content folders come with their first page (1.7.4)
         (self.base / "wiki/projects/garden.md").write_text(page_text("Garden", "Beans."))
         out = self.ms("uninstall", "--no-backup")
         self.assertIn("backup: skipped (--no-backup)", out)
@@ -1337,6 +1347,7 @@ class KeepsYourDataTests(Base):
         self.py(repo / "tools/update-components.py", "--relock")
         self.ms("--yes", repo=repo)
         g = self.base / "wiki/projects/garden.md"
+        g.parent.mkdir(parents=True, exist_ok=True)      # content folders come with their first page (1.7.4)
         g.write_text(page_text("Garden", "Beans."))
         out = self.ms("uninstall", repo=repo)
         self.assertIn(f"put back {g} from the backup", out)

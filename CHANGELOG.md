@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.15 (2026-11-14)
+
+- Skeleton Base 1.7.4 `7323b49`: the base review. Sync scope "notes" (the Mac gets notes, not code) as the default;
+  backups older than 30 days pruned; an owner guide (`wiki/how-this-base-works.md`), a session index, a memories page,
+  a weekly review (Sunday, with an optional notify command), a dashboard with goals and Obsidian views, a generated
+  glossary; no empty content folders; size warnings; `ingest --baseline`; tidy and the projects registry fixed.
+
 ## v1.2.14 (2026-11-14)
 
 - Skeleton Base 1.7.3 `ba96868`: doctor finds the Syncthing drop-in in the base's unit folder; a pinned file path is

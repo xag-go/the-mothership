@@ -27,7 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.2.14"
+VERSION = "1.2.15"
 ROOT = Path(__file__).resolve().parent
 LOCK = "components.lock"
 STATE = ".mothership.json"
@@ -47,8 +47,11 @@ BACKUPS_DIR = "skeleton-base-backups"     # under HOME, outside the base
 # is put back from the backup archive. Unmodified kit files are recognised by their bytes.
 OWNED = {".kits.json", STATE, "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore", ".claude/settings.json",
          ".gemini/settings.json", "maps/brain.canvas", "maps/brain.html", ".brain/map.json", ".brain/search.db",
-         ".brain/watch.lock", ".brain/collector.lock", ".brain/kick"}
-OWNED_PREFIXES = (".brain/pycache/",)
+         ".brain/watch.lock", ".brain/collector.lock", ".brain/kick",
+         # pages Skeleton Base 1.7.4+ writes itself (it keeps them on uninstall when the owner added text)
+         "wiki/glossary.md", "wiki/how-this-base-works.md", "wiki/sessions.md", "wiki/memories.md", "wiki/dashboard.md",
+         "wiki/decisions-newest.base", "wiki/projects-by-status.base", "wiki/stale-pages.base"}
+OWNED_PREFIXES = (".brain/pycache/", "wiki/weekly/")
 STEPS = ("stage", "base-init", "frugal-project", "connect", "frugal-global", "frugal-kit-key", "claude-access", "reconnect",
          "systemd", "checks")
 
