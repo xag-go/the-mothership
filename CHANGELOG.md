@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.12 (2026-11-14)
+
+- Skeleton Base 1.7.1 `4c3c649`: `engine pin claude-code` accepts `~/.claude.json` when its link goes through the base
+  into the vault; doctor no longer reports a pinned desktop app folder (a guard file) as outside.
+
 ## v1.2.11 (2026-11-14)
 
 - Skeleton Base 1.7.0 `9b61390` (with 1.6.9): no links at old paths where a setting exists. Secrets of every
