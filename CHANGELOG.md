@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.2.11 (2026-11-14)
+
+- Skeleton Base 1.7.0 `9b61390` (with 1.6.9): no links at old paths where a setting exists. Secrets of every
+  Chromium/Electron profile are vaulted; skills go into each tool's own folder; `engine pin` tells a tool its place in
+  the base (Claude Code: CLAUDE_CONFIG_DIR everywhere; desktop apps: `--user-data-dir` in launchers) and guards the old
+  path; `engine pin-units` gives systemd the base's unit folder (one sudo step); known tools' variables are set before
+  they are installed, and watch adopts a new AI tool folder by itself.
+- Frugal-Bridge 2.45 `aec9c59`: skills go into each tool's own folder (Codex: `$CODEX_HOME/skills`).
+- Tests: connect's record `.brain/backups/engines-env.json` (shell files to put back on disconnect) is connect's own.
+
 ## v1.2.10 (2026-11-13)
 
 - Skeleton Base 1.6.8 `4ec517a`: `~/.agents/skills` moves whole into the base behind a link; doctor scans the whole

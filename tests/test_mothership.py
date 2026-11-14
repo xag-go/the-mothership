@@ -1120,7 +1120,7 @@ def full_tree(d, skip=()):
 
 USER_RULES = "# My own rules\n\nAlways cite the page you used.\n\n"
 # what the products may remove or rewrite in the base on uninstall (their own files); everything else must stay
-CONNECT_COPIES = {"engines.json", "engines", "engines/agents-skills"}   # made by connect inside the base
+CONNECT_COPIES = {"engines.json", "engines", "engines/agents-skills", ".brain/backups/engines-env.json"}   # made by connect inside the base
 PRODUCT_FILES = {".kits.json", ".mothership.json", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore",
                  ".claude/settings.json", ".gemini/settings.json", "maps/brain.html", ".brain/map.json",
                  ".brain/search.db", ".brain/collector.lock", ".brain/watch.lock", ".brain/kick"}

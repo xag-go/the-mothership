@@ -2,6 +2,88 @@
 
 Changes to the skeleton structure and tools (not to anyone's content).
 
+## v1.7.0 - 2026-11-14
+No links at old paths: every program is told the new place, and the old path holds the guard file (0 bytes, mode
+000), so a launcher we do not know of fails loudly instead of making a new empty folder. Doctor: a missing guard, a
+link or a real folder at a pinned path is an ERROR with the fix (a program that still tries the old path cannot be
+seen from here).
+- **Claude Code** (`engine pin claude-code`, from 1.6.9): CLAUDE_CONFIG_DIR in the marked blocks of
+  `~/.config/environment.d/60-base-engines.conf` (user units and GUI sessions), `~/.profile` and `~/.bashrc`;
+  `~/.claude` and `~/.claude.json` become guard files. Undo: `engine pin --undo claude-code`.
+- **Electron apps** (`engine pin claude-desktop`, `engine pin codex-desktop`): `--user-data-dir=<base>/engines/<id>`
+  wherever we can find what starts them: a user `.desktop` override in `~/.local/share/applications` of each system
+  `.desktop` file whose Exec starts the app (`$XDG_DATA_DIRS`; a copy with only the Exec lines changed, actions and
+  URL-scheme handlers included), a wrapper `~/.local/bin/<program>` (earlier on PATH) that runs the real program with
+  the flag, and the app's `~/.config/autostart` entries. Then `~/.config/<App>` becomes the guard. watch refreshes an
+  override when a package update changes the system file (or the app rewrites its own user copy, as the Claude app
+  does with `X-Claude-Generated`). Undo puts every file back and the link. The app must honour `--user-data-dir`
+  (Chromium's switch; check once by starting it: the guard makes a failure loud). hermes-desktop is started by
+  `hermes desktop`, which passes no flag we know of: its link stays (no setting known).
+- **Units** (`engine pin-units [--undo]`): units live in `ops/systemd`; the user manager is told the place by
+  `Environment="SYSTEMD_UNIT_PATH=<base>/ops/systemd:"` in `/etc/systemd/system/user@.service.d/skeleton-base-units.conf`
+  (the trailing ':' keeps the default search path: systemd.unit(5), "Unit File Load Path"). It cannot write /etc:
+  it prints the one-time sudo commands and the restart step (log out of every session, or restart the
+  user manager unit `user@<uid>`), and removes the links in `~/.config/systemd/user` only once `systemctl --user show -p
+  UnitPath` lists ops/systemd. Enable links (`*.wants`, `*.requires`) that pointed at a removed link are pointed at
+  the unit file in ops/systemd (`systemctl enable` links a unit found on the search path to that file:
+  systemctl(1), "enable"). An installer that writes a unit there again: doctor ERROR, watch moves it into
+  ops/systemd (no link).
+- **Born in the base**: connect pre-sets each tool's own variable (one that moves that tool alone: CLAUDE_CONFIG_DIR,
+  CODEX_HOME, HERMES_HOME, OPENCLAW_STATE_DIR, COPILOT_HOME, GEMINI_CLI_HOME; never XDG_*) to `<base>/engines/<tool>`
+  in the same env blocks when the tool is not installed and nothing is at its default place, so its first run makes
+  its folder in the base; no empty folder is made; doctor says nothing about a pre-set variable; `engine adopt` or
+  watch records it as adopted once it exists. Qwen, Kilo, Goose and opencode have no variable of their own (XDG only).
+- **New AI folders are adopted by watch**: an AI-looking folder (rules or memory) that appears in `~`, `~/.config`,
+  `~/.local/share` or `~/.local/state` after the first run moves into `engines/<name>` when no program uses it (else
+  on a later run); no setting is known for it, so its link stays and is reported; it is listed in
+  `.brain/learned-tools.json`. disconnect gives these folders back. Folders without AI signals are never moved
+  (doctor lists them as unclassified).
+- **The only links allowed** (no setting known to tell the program the new place): `~/.config/Hermes`
+  (hermes-desktop), `~/.google_workspace_mcp`, `~/.cua-driver`, `~/.config/browser-harness`, `~/.config/hcli`
+  (XDG_CONFIG_HOME only), `~/.ida-mcp`, `~/.local/share/fastmcp` (FASTMCP_HOME exists but no MCP server entry here
+  launches fastmcp to set it in), the ntfy folders until their unit and server.yml are changed by hand, folders watch
+  adopted by itself. `~/.agents/skills` while a tool reads only it.
+
+## v1.6.9 - 2026-11-13
+- **Secrets in Chromium/Electron sub-profiles**: a profile row (claude-desktop, codex-desktop, hermes-desktop:
+  `profiles` in the row) and any folder adopted by a link get the Chromium login names at ANY depth, so `Default/`,
+  `Profile N/` and `Partitions/*/` are covered, not only the top: Cookies, Cookies-journal, Login Data*, Web Data*,
+  Account Web Data*, Trust Tokens* (files) and Local Storage/, Session Storage/, IndexedDB/, WebStorage/ (each one
+  link). `engine vault` moves them and doctor's secret scan reports each one not yet vaulted as an ERROR (1.6.8 saw
+  only the top: `engine adopt codex-desktop` found nothing to vault).
+- Their caches are heavy in every profile too: Cache, Code Cache, GPUCache, Dawn*Cache, Service Worker (CacheStorage),
+  blob_storage, Shared Dictionary, shader caches: `/engines/<id>/**/<name>` lines in the generated .gitignore and
+  .stignore blocks, never walked by the vault. claude-desktop keeps its profile at the top (re-checked: no
+  sub-profile), so it changes only by these any-depth lines.
+- **Skills in each tool's own folder**: connect writes the base's skills into each installed tool's own skills
+  folder (Codex: `$CODEX_HOME/skills`, verified in the Codex binary; Hermes: `$HERMES_HOME/skills/skeleton-base/`, its
+  category layout) and into `~/.agents/skills` only while an installed tool reads skills from nowhere else. A tool
+  that reads both (Codex reads `~/.agents/skills` and `$CODEX_HOME/skills`) then gets them only in `~/.agents/skills`:
+  never twice. When no installed tool needs `~/.agents/skills`, connect's copies there go (archived first) and the
+  link and `engines/agents-skills` go once nothing else is in it; files of other kits (Frugal-Bridge's frugal-*) or
+  yours stay and are reported. Copies inside a tool's folder in the base are listed in the kit's `created` record.
+  The Claude app syncs its skills to `~/.claude/skills/synced` (its own text says so), i.e. Claude Code's folder;
+  the `synced/` in `~/.agents/skills` is an old copy that connect does not touch.
+- **A link only where nothing else works**: doctor WARNs "a link where a setting exists" for a link into the base
+  at the default place of a tool that has its own setting (Claude Code `~/.claude`, `~/.claude.json`, ...), with the
+  fix `brain.py engine pin TOOL`; links for tools without a setting (the Claude app, ...) and unit links stay OK.
+  `engine pin TOOL [--undo]` writes the variable where every launcher sees it (the marked blocks in
+  `~/.config/environment.d/60-base-engines.conf` for user units and GUI sessions, `~/.profile`, `~/.bashrc`), then
+  replaces each link by the guard file (0 bytes, mode 000, one rename); undo puts the links back. It refuses a real
+  folder or file there (split brain).
+- ntfy (`ntfy-config`, `ntfy-data`): no code here: rewriting `--config` in the unit and `cache-file`, `auth-file`,
+  `attachment-cache-dir` in server.yml is specific to ntfy, so it is done by hand; the links stay until then.
+- MCP folders, settings that move them (none is set by connect; their links stay):
+  fastmcp: `FASTMCP_HOME` moves `~/.local/share/fastmcp` (fastmcp `settings.py`: env prefix `FASTMCP_`, `home =
+  user_data_dir("fastmcp")`), to be set in the env of the MCP server that uses fastmcp (none found in the tools'
+  MCP configs here). hcli: only `XDG_CONFIG_HOME` (moves every program; hcli `lib/config/__init__.py`:
+  `user_config_dir("hcli", "hex-rays")`). browser-harness: `BH_RUNTIME_DIR`/`BH_TMP_DIR` move only its runtime/ and
+  tmp/ (hermes-agent `tools/browser_harness_dirs.py`), not the folder. cua-driver, ida-mcp (`IDAUSR` moves only
+  ~/.idapro, not verified), google-workspace-mcp: none found in code on this machine (not installed as packages;
+  upstream docs not checked).
+- doctor: a `.brain/outside.json` entry for a path (e.g. `{"path": "~/.cache/codex-runtimes", "reason": "cache"}`)
+  also silences the "cache named after a product, over 50 MB" check for that path.
+
 ## v1.6.8 - 2026-11-13
 - **`~/.agents/skills` moves whole into the base**, whatever it holds (connect's copies, other kits' skills such as
   Frugal-Bridge's, your own skills, the Claude app's `synced/`): connect moves it with the same mover and checks as

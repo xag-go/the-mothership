@@ -1014,3 +1014,14 @@ Readings:
 - Tests: `kit/test_hosts.py` 4 new (merged form kept verbatim; base below ours; base added below ours after
   install; absent tool not listed and record dropped).
 - Not done: a Hermes backend recorded for an absent Hermes is not restored by uninstall (its record is dropped).
+
+### 2.45 Skills go into each tool's own folder; the shared ~/.agents/skills only for a tool that reads nothing else (2026-11-13)
+- Change: Codex's skills go to `$CODEX_HOME/skills` (its own folder, as its binary documents), not the shared
+  `~/.agents/skills`. Each tool gets its skills once. A Frugal copy in `~/.agents/skills` is removed when no installed
+  tool reads that folder (only our files: unchanged since written or the kit's own text; backed up first; the folder
+  stays for Skeleton Base). A copy the user edited is kept. `RELEASE = "2.45"`.
+- Tests: `kit/test_hosts.py` 5 new (codex own folder; shared copy removed when not needed; kept while an installed
+  host reads it; user-edited copy kept; old identical copy removed with the empty folder left).
+- Not done: the other tools whose skills are "shared" (Gemini, Qwen, opencode, ...) keep the shared folder: their own
+  folders are not documented in this kit yet. Codex also reads the shared folder, so while a shared-reading tool is
+  installed Codex sees the same skills there too.

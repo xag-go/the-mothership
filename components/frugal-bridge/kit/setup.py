@@ -36,7 +36,7 @@ ROOT = os.path.dirname(KIT)
 sys.path.insert(0, KIT)
 import hosts as HOSTS  # noqa: E402  (kit/hosts.py: the table of agent tools)
 VERSION = "6"          # rules-block marker (changes only when the block format changes)
-RELEASE = "2.44"       # the Frugal-Bridge release: what install --global and the base compare
+RELEASE = "2.45"       # the Frugal-Bridge release: what install --global and the base compare
 START, END = "<!-- frugal-bridge:start v{v} -->", "<!-- frugal-bridge:end -->"
 START_RE = re.compile(r"<!-- frugal-bridge:start v[^>]*-->")
 BASE_END = "<!-- base-folder:end -->"
@@ -1087,6 +1087,7 @@ class GlobalSetup(Setup):
             if ik in tools or ik in (r.get("copied") or {}):
                 with HOSTS.home_override(t, home):
                     self.copy_skills_for(t, r)
+        self.drop_shared_skills(r, insts)
         self.drop_absent_rules(r, tools, insts)
         r["version"] = VERSION
         r["written"] = {**(r.get("written") or {}), **(getattr(self, "written", None) or {})}
@@ -1148,25 +1149,60 @@ class GlobalSetup(Setup):
             tools_[ik]["plugin"] = self.copy_plugins(HOSTS.root(t), remember=True)
             self.note_backend(r, HOSTS.root(t))
 
-    def copy_skills_for(self, t, r):
-        """Skills once per folder: the shared ~/.agents/skills for every tool that reads it, else the tool's own."""
+    def skills_dir_for(self, t):
+        """The folder a tool reads Frugal's skills from: its own folder when it has one, else the shared
+        ~/.agents/skills (None: the tool has no skills)."""
         s = HOSTS.H[t].get("skills")
         if not s:
-            return
+            return None
         if t == "hermes":
             ext = HOSTS._read(os.path.join(HOSTS.root(t), "config.yaml")) or ""
             dirs = _yaml_key(ext, "skills", "external_dirs") or []
             if any(os.path.expanduser(x).rstrip("/") == os.path.expanduser(HOSTS.SHARED_SKILLS) for x in dirs):
                 s = "shared"
-        d = os.path.expanduser(HOSTS.SHARED_SKILLS) if s == "shared" else HOSTS.expand(t, s)
+        return os.path.expanduser(HOSTS.SHARED_SKILLS) if s == "shared" else HOSTS.expand(t, s)
+
+    def copy_skills_for(self, t, r):
+        """Skills once per tool: into the tool's own folder, or the shared ~/.agents/skills for a tool that reads only that."""
+        d = self.skills_dir_for(t)
+        if not d:
+            return
         sd = r.setdefault("skills_dirs", [])
         if d not in sd:
             sd.append(d)
         self.copy_skills(d)
-        if t == "codex":       # older versions copied them to ~/.codex/skills: Codex reads ~/.agents/skills
-            old = os.path.join(HOSTS.root(t), "skills")
-            for sk in os.listdir(os.path.join(KIT, "skills")):
-                self.remove_copy(os.path.join(old, sk), os.path.join(KIT, "skills", sk), r.get("written") or {})
+
+    def drop_shared_skills(self, r, insts):
+        """Frugal's copies in the shared ~/.agents/skills go when no installed tool reads that folder. Only our files
+        are removed (unchanged since written, or the kit's own text), each backed up first; the folder itself stays
+        for Skeleton Base to remove."""
+        shared = os.path.expanduser(HOSTS.SHARED_SKILLS)
+        needed = False
+        for t in HOSTS.H:
+            if HOSTS.installed(t) and self.skills_dir_for(t) == shared:
+                needed = True
+        for ik, t, home in insts:
+            with HOSTS.home_override(t, home):
+                if self.skills_dir_for(t) == shared:
+                    needed = True
+        if needed:
+            return
+        written = r.get("written") or {}
+        for sk in sorted(os.listdir(os.path.join(KIT, "skills"))):
+            f = os.path.join(shared, sk, "SKILL.md")
+            if not os.path.isfile(f):
+                continue
+            cur = open(f, "rb").read()
+            kit = open(os.path.join(KIT, "skills", sk, "SKILL.md"), "rb").read()
+            if cur != kit and sha(cur) != written.get(os.path.abspath(f)):
+                self.log.append(f"kept {f}: you changed it")
+                continue
+            self.backup(f); os.remove(f); written.pop(os.path.abspath(f), None)
+            self.log.append(f"removed {f} (no installed tool reads ~/.agents/skills any more)")
+            d = os.path.dirname(f)
+            if not os.listdir(d):
+                os.rmdir(d)
+        r["written"] = written
 
     @staticmethod
     def note_backend(r, home):

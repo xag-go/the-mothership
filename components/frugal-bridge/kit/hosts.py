@@ -39,7 +39,7 @@ H = {
         label="Codex CLI (and the ChatGPT desktop app's Codex side)", root=("CODEX_HOME", "~/.codex"), bins=["codex"],
         proof=["@root/config.toml", "@root/auth.json"], rules="@root/AGENTS.md", override="@root/AGENTS.override.md",
         cap=("bytes", 32 * 1024, "combined with the project AGENTS.md (project_doc_max_bytes)"),
-        skills="shared", hooks="codex", filter=True, usage="Stop: rollout token_usage_record (PostModelRequest token_usage on newer Codex)",
+        skills="@root/skills", hooks="codex", filter=True, usage="Stop: rollout token_usage_record (PostModelRequest token_usage on newer Codex)",
         tiers="codex-agents", family="codex-config", proxy="model_providers.<id>.base_url",
         notes="Hooks run only after the user trusts them in /hooks (by hash; re-trust after a change). Output filter = "
               "PostToolUse block+reason (the reason replaces the result; partial)."),

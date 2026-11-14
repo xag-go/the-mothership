@@ -1011,10 +1011,11 @@ class ConnectTests(HomeBase):
                                                     {"hooks": [{"type": "command", "command": cmd}]}])
         self.assertEqual(s["hooks"]["PreCompact"], [{"matcher": "", "hooks": [{"type": "command", "command": cmd}]}])
         self.assertTrue(any((self.base / ".brain/backups").rglob("settings.json")))
-        # the base's pointer file (other kits find the base there) is the only thing written under ~/.config
+        # the base's pointer file (other kits find the base there) and (1.7.0) the pre-set variables of tools not
+        # installed yet are the only things written under ~/.config
         self.assertEqual((self.home / ".config/skeleton-base/base").read_text(), b + "\n")
         self.assertEqual(sorted(k for k, v in tree(self.home).items() if k.startswith(".config/") and v != "dir"),
-                         [".config/skeleton-base/base"])
+                         [".config/environment.d/60-base-engines.conf", ".config/skeleton-base/base"])
         snap = (tree(self.home), tree(self.base, skip=()))
         self.ok("connect")
         self.assertEqual(snap, (tree(self.home), tree(self.base, skip=())), "second connect changes nothing")
@@ -1690,7 +1691,8 @@ class UninstallKeepsDataTests(HomeBase):
         self.ok("disconnect")
         t2 = full_tree(b)
         diff = sorted(k for k in set(t1) | set(t2) if t1.get(k) != t2.get(k))
-        own = [k for k in diff if k == "engines.json" or k.startswith("engines/agents-skills")]
+        own = [k for k in diff if k in ("engines.json", ".brain/backups/engines-env.json") or
+               k.startswith("engines/agents-skills")]
         self.assertTrue(own and all(k not in t2 for k in own), own)          # connect's skills folder goes with it
         self.assertEqual([k for k in diff if k not in own], [".kits.json"])  # else only its own record
         self.assertEqual(git(b, "rev-list", "--count", "HEAD").strip(), "3")
@@ -4017,7 +4019,7 @@ class EverythingInBaseTests(ToolHome):
         self.ok_env("engine", "release", "claude-code", "--base", str(self.base),
                     env={"CLAUDE_CONFIG_DIR": str(self.eng / "claude")})
         self.assertEqual(tree(self.home), home0)
-        self.assertFalse((self.base / "engines.json").exists())
+        self.assertNotIn("engines", json.loads((self.base / "engines.json").read_text()))   # 1.7.0: only presets
         self.ok_env("disconnect")
         self.assertEqual((self.home / ".claude/CLAUDE.md").read_text(), "# owner rules\n")
 
@@ -4228,7 +4230,8 @@ class EverythingInBaseTests(ToolHome):
         self.assertFalse([x for x in rows if x.startswith("OUTSIDE") and "~/.codex" in x], r.stdout)
         self.assertTrue([x for x in rows if x.startswith("WARN") and "guard file" in x and "CODEX_HOME" in x],
                         r.stdout)
-        self.assertTrue([x for x in rows if x.startswith("OK") and "guard link" in x and "~/.claude" in x], r.stdout)
+        self.assertTrue([x for x in rows if x.startswith("WARN") and "a link where a setting exists" in x
+                         and "~/.claude" in x and "engine pin claude-code" in x], r.stdout)          # 1.6.9
         self.assertNotIn("not wired by connect", r.stdout)
         self.assertNotIn("engine adopt", r.stdout)
         env = {"CODEX_HOME": str(self.eng / "codex"), "CLAUDE_CONFIG_DIR": str(self.eng / "claude")}
@@ -5354,8 +5357,8 @@ class SkillsLinkTests(ToolHome):
 
     def setUp(self):
         super().setUp()
-        self.bins("codex")
-        self.write(self.home, ".codex/config.toml", 'model = "x"\n')
+        self.bins("gemini")                     # reads skills only from ~/.agents/skills
+        self.write(self.home, ".gemini/settings.json", "{}\n")
         self.link, self.dest = self.home / ".agents/skills", self.base / "engines/agents-skills"
 
     def reg(self):
@@ -5448,7 +5451,7 @@ class SkillsLinkTests(ToolHome):
             self.skipTest("no second filesystem")
         h = pathlib.Path(tempfile.mkdtemp(prefix="skb-xfs-", dir=shm))
         self.addCleanup(shutil.rmtree, h, True)
-        self.write(h, ".codex/config.toml", 'model = "x"\n')
+        self.write(h, ".gemini/settings.json", "{}\n")
         self.write(h, ".agents/skills/mine/SKILL.md", "mine\n")
         r = self.hb("connect", env={"HOME": str(h)})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -5549,8 +5552,8 @@ class LiveGapsTests(ToolHome):
         self.assertIn("GEMINI_CLI_HOME", line)
 
     def test_skills_written_by_an_older_connect_are_ours(self):
-        self.bins("codex")
-        self.write(self.home, ".codex/config.toml", 'model = "x"\n')
+        self.bins("gemini")
+        self.write(self.home, ".gemini/settings.json", "{}\n")
         self.ok("connect")
         link = self.home / ".agents/skills"
         os.unlink(link)                                                      # an older release: a real folder
@@ -5577,8 +5580,8 @@ class LiveGapsTests(ToolHome):
             self.assertNotIn("Use it when", (self.home / rr).read_text())
 
     def test_a_skill_file_you_edited_is_kept(self):
-        self.bins("codex")
-        self.write(self.home, ".codex/config.toml", 'model = "x"\n')
+        self.bins("gemini")
+        self.write(self.home, ".gemini/settings.json", "{}\n")
         self.ok("connect")
         f = self.home / ".agents/skills/base-lint/SKILL.md"
         f.write_text("# my own lint skill\n")
@@ -5836,3 +5839,431 @@ class FullScanFollowUpTests(ToolHome):
         self.assertTrue(B.st_dropin_ok(self.base, self.home))
         self.write(ops, d.name, "[Service]\n")
         self.assertFalse(B.st_dropin_ok(self.base, self.home))
+
+
+class ElectronProfileTests(ToolHome):
+    """1.6.9: Chromium/Electron profiles keep logins in sub-profiles (Default/, Partitions/*/): vaulted there too,
+    their caches heavy there too, and doctor's secret scan sees them."""
+
+    SECRETS = ("Default/Cookies", "Default/Cookies-journal", "Default/Login Data", "Default/Login Data-journal",
+               "Default/Login Data For Account", "Default/Web Data", "Default/Account Web Data",
+               "Default/Trust Tokens", "Partitions/a/Cookies", "Partitions/b/Trust Tokens-journal")
+    SECRET_DIRS = ("Default/Local Storage", "Default/Session Storage", "Default/IndexedDB", "Partitions/a/Local Storage")
+    HEAVY = ("Default/Cache", "Default/Code Cache", "Default/Service Worker", "Partitions/a/GPUCache",
+             "Partitions/b/blob_storage")
+
+    def profile(self, d):
+        for f in self.SECRETS:
+            self.write(d, f, f"SECRET-VALUE {f}\n").chmod(0o600)
+        for x in self.SECRET_DIRS:
+            self.write(d, f"{x}/leveldb/000003.log", "SECRET-VALUE\n")
+        for x in self.HEAVY:
+            self.write(d, f"{x}/data_0", "heavy\n")
+        for p in ("", "Default/", "Partitions/a/", "Partitions/b/"):
+            self.write(d, f"{p}Preferences", "{}\n")
+        self.write(d, "Local State", "{}\n")
+        return d
+
+    def test_codex_desktop_vaults_every_profile_and_keeps_caches_out(self):
+        src = self.profile(self.home / ".config/Codex")
+        r = self.hb("engine", "adopt", "codex-desktop", "--base", str(self.base))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        dest = self.base / "engines/codex-desktop"
+        for f in self.SECRETS + self.SECRET_DIRS:
+            self.assertTrue((dest / f).is_symlink(), f)
+        self.assertEqual((src / "Default/Login Data").read_text(), "SECRET-VALUE Default/Login Data\n")
+        for x in self.HEAVY:
+            self.assertFalse((dest / x).is_symlink(), x)
+        for f in ("Default/Preferences", "Local State"):
+            self.assertFalse((dest / f).is_symlink(), f)
+        gi, st = (self.base / ".gitignore").read_text(), (self.base / ".stignore").read_text()
+        for h in ("Cache", "Code Cache", "Service Worker", "GPUCache", "blob_storage"):
+            self.assertIn(f"/engines/codex-desktop/**/{h}/", gi)
+            self.assertIn(f"/engines/codex-desktop/**/{h}\n", st)
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertNotRegex(out, r"ERROR.*codex-desktop")
+        r = self.hb("engine", "adopt", "--undo", "codex-desktop", "--base", str(self.base))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse((src / "Default/Cookies").is_symlink())
+        self.assertEqual((src / "Default/Cookies").read_text(), "SECRET-VALUE Default/Cookies\n")
+
+    def test_doctor_errors_on_an_unvaulted_nested_login(self):
+        d = self.profile(self.base / "engines/hermes-desktop")
+        (self.base / "engines.json").write_text(json.dumps({"engines": {"hermes-desktop": {
+            "tool": "hermes-desktop", "mode": "adopted", "link": True, "from": "~/.config/Hermes"}}}))
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        for f in ("Default/Login Data", "Partitions/a/Cookies", "Partitions/a/Local Storage/leveldb/000003.log"):
+            self.assertRegex(out, rf"ERROR.*engines/hermes-desktop/{re.escape(f)}\b.*engine vault hermes-desktop", f)
+        self.assertNotRegex(out, r"ERROR.*hermes-desktop/Default/Cache/")
+
+    def test_a_generic_adopted_engine_is_scanned_at_any_depth(self):
+        d = self.base / "engines/someapp"
+        self.write(d, "deep/profile/Cookies", "SECRET-VALUE\n")
+        (self.base / "engines.json").write_text(json.dumps({"engines": {"someapp": {
+            "tool": "someapp", "mode": "adopted", "link": True, "from": "~/someapp"}}}))
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertRegex(out, r"ERROR.*engines/someapp/deep/profile/Cookies")
+
+    def test_claude_desktop_row_is_a_profile_row(self):
+        self.assertTrue(B.TOOLS[".config/Claude"].get("profiles"))
+        for i in ("codex-desktop", "hermes-desktop"):
+            self.assertTrue(B.ADOPT_ROWS[i].get("profiles"), i)
+
+
+class CacheAllowTests(ToolHome):
+    def test_a_path_reason_entry_silences_the_product_cache_check(self):
+        for n in ("codex-runtimes", "claude-big"):
+            d = self.home / ".cache" / n
+            d.mkdir(parents=True)
+            with open(d / "blob", "wb") as f:
+                f.truncate(60 * 1024 * 1024)
+        self.write(self.base, ".brain/outside.json", json.dumps({"allow": [
+            {"path": "~/.cache/codex-runtimes", "reason": "cache"}]}))
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertNotIn("codex-runtimes", out)
+        self.assertRegex(out, r"OUTSIDE\s+~/\.cache/claude-big: a cache named after a product")
+
+
+class SkillsPerToolTests(ToolHome):
+    """1.6.9: the base's skills go into each installed tool's own skills folder; ~/.agents/skills only while a tool
+    reads skills from nowhere else; never twice in one tool."""
+
+    def codex(self):
+        self.bins("codex")
+        self.write(self.home, ".codex/config.toml", 'model = "x"\n')
+        self.write(self.home, ".codex/skills/.system/own/SKILL.md", "codex's own\n")
+
+    def gemini(self):
+        self.bins("gemini")
+        self.write(self.home, ".gemini/settings.json", "{}\n")
+
+    def test_codex_alone_gets_its_own_folder_and_no_link(self):
+        self.codex()
+        self.ok("connect")
+        self.assertTrue((self.home / ".codex/skills/base-home/SKILL.md").is_file())
+        self.assertFalse(os.path.lexists(self.home / ".agents/skills"))
+        self.assertEqual((self.home / ".codex/skills/.system/own/SKILL.md").read_text(), "codex's own\n")
+        self.ok("disconnect")
+        self.assertFalse((self.home / ".codex/skills/base-home").exists())
+        self.assertEqual((self.home / ".codex/skills/.system/own/SKILL.md").read_text(), "codex's own\n")
+
+    def test_codex_home_in_the_base(self):
+        self.bins("codex")
+        ch = self.base / "engines/codex"
+        self.write(ch, "config.toml", 'model = "x"\n')
+        r = self.hb("connect", env={"CODEX_HOME": str(ch)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((ch / "skills/base-home/SKILL.md").is_file())
+        self.assertFalse(os.path.lexists(self.home / ".agents/skills"))
+        k = json.loads((self.base / ".kits.json").read_text())["kits"]["base-folder"]
+        self.assertIn("engines/codex/skills/base-home/SKILL.md", k["created"], "listed as connect's own")
+
+    def test_codex_and_gemini_share_agents_skills_only(self):
+        self.codex(); self.gemini()
+        self.ok("connect")
+        self.assertTrue((self.home / ".agents/skills/base-home/SKILL.md").is_file())
+        self.assertFalse((self.home / ".codex/skills/base-home").exists(), "never twice in Codex")
+
+    def test_when_no_tool_needs_agents_skills_the_copies_move_and_the_link_goes(self):
+        self.codex(); self.gemini()
+        self.ok("connect")
+        self.assertTrue((self.home / ".agents/skills").is_symlink())
+        os.unlink(self.bin / "gemini"); os.unlink(self.home / ".gemini/settings.json")
+        r = self.ok("connect")
+        self.assertTrue((self.home / ".codex/skills/base-home/SKILL.md").is_file())
+        self.assertFalse(os.path.lexists(self.home / ".agents/skills"), r.stdout)
+        self.assertFalse((self.base / "engines/agents-skills").exists())
+        self.assertTrue(list((self.base / ".brain/backups").rglob("base-home/SKILL.md")), "archived first")
+
+    def test_other_kits_files_keep_the_link_and_are_reported(self):
+        self.codex(); self.gemini()
+        self.write(self.home, ".agents/skills/frugal-handoff/SKILL.md", "frugal's\n")
+        self.ok("connect")
+        os.unlink(self.bin / "gemini"); os.unlink(self.home / ".gemini/settings.json")
+        r = self.ok("connect")
+        self.assertIn("frugal-handoff", r.stdout)
+        self.assertTrue((self.home / ".agents/skills").is_symlink())
+        self.assertEqual((self.home / ".agents/skills/frugal-handoff/SKILL.md").read_text(), "frugal's\n")
+        self.assertFalse((self.home / ".agents/skills/base-home").exists())
+        self.assertTrue((self.home / ".codex/skills/base-home/SKILL.md").is_file())
+
+    def test_hermes_gets_its_own_category_folder(self):
+        self.bins("hermes")
+        self.write(self.home, ".hermes/config.yaml", "model: x\n")
+        self.ok("connect")
+        self.assertTrue((self.home / ".hermes/skills/skeleton-base/base-home/SKILL.md").is_file())
+        self.assertFalse(os.path.lexists(self.home / ".agents/skills"))
+
+
+class PinTests(ToolHome):
+    """H1/H2: a link where a setting exists is a WARN; `engine pin` puts the variable where every launcher sees
+    it and guard files in place of the links, with undo (fake HOME)."""
+
+    def setUp(self):
+        super().setUp()
+        cl = self.base / "engines/claude"
+        self.write(cl, "CLAUDE.md", "x\n")
+        self.write(cl, ".claude.json", "{}\n")
+        (self.home / ".claude").symlink_to(cl)
+        (self.home / ".claude.json").symlink_to(cl / ".claude.json")
+        (self.base / "engines.json").write_text(json.dumps({"engines": {"claude": {
+            "tool": "claude-code", "mode": "adopted", "env": "CLAUDE_CONFIG_DIR", "from": "~/.claude",
+            "moved": [".claude.json"], "since": "2026-11-13"}}}))
+        self.cl = cl
+
+    def test_doctor_warns_pin_replaces_links_and_undo_restores(self):
+        out = self.hb("doctor", "--base", str(self.base), env={"CLAUDE_CONFIG_DIR": str(self.cl)}).stdout
+        self.assertRegex(out, r"WARN\s+Claude Code: ~/\.claude is a link into the base, a link where a setting "
+                              r"exists \(CLAUDE_CONFIG_DIR\) -> brain\.py engine pin claude-code")
+        self.assertRegex(out, r"WARN\s+Claude Code: ~/\.claude\.json is a link into the base")
+        r = self.hb("engine", "pin", "claude-code", "--base", str(self.base))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for p in (self.home / ".claude", self.home / ".claude.json"):
+            self.assertFalse(p.is_symlink(), p)
+            self.assertEqual((p.stat().st_size, p.stat().st_mode & 0o777), (0, 0), p)
+        self.assertIn(f"CLAUDE_CONFIG_DIR={self.cl}",
+                      (self.home / ".config/environment.d/60-base-engines.conf").read_text())
+        self.assertIn("CLAUDE_CONFIG_DIR", (self.home / ".profile").read_text())
+        out = self.hb("doctor", "--base", str(self.base), env={"CLAUDE_CONFIG_DIR": str(self.cl)}).stdout
+        self.assertNotIn("a link where a setting exists", out)
+        r = self.hb("engine", "pin", "--undo", "claude-code", "--base", str(self.base))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(os.readlink(self.home / ".claude"), str(self.cl))
+        self.assertEqual(os.readlink(self.home / ".claude.json"), str(self.cl / ".claude.json"))
+
+    def test_pin_refuses_a_real_folder(self):
+        os.unlink(self.home / ".claude")
+        (self.home / ".claude").mkdir()
+        r = self.hb("engine", "pin", "claude-code", "--base", str(self.base))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("real folder", r.stdout + r.stderr)
+        self.assertTrue((self.home / ".claude.json").is_symlink(), "nothing changed")
+
+    def test_a_link_for_a_tool_without_a_setting_stays_ok(self):
+        app = self.base / "engines/hermes-desktop"
+        self.write(app, "config.json", "{}\n")
+        (self.home / ".config").mkdir(exist_ok=True)
+        (self.home / ".config/Hermes").symlink_to(app)
+        reg = json.loads((self.base / "engines.json").read_text())
+        reg["engines"]["hermes-desktop"] = {"tool": "hermes-desktop", "mode": "adopted", "link": True,
+                                            "from": "~/.config/Hermes"}
+        (self.base / "engines.json").write_text(json.dumps(reg))
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertRegex(out, r"OK\s+~/\.config/Hermes: link into engines/hermes-desktop")
+        self.assertNotRegex(out, r"WARN.*\.config/Hermes.*setting exists")
+
+
+class AppPinTests(ToolHome):
+    """1.7.0 P2: an Electron app adopted into the base is told the new place (--user-data-dir) by a .desktop
+    override of each system .desktop file, a wrapper on PATH and its autostart entries; its old path is a guard."""
+
+    def setUp(self):
+        super().setUp()
+        self.sys = self.tmp / "usr-share"
+        (self.sys / "applications").mkdir(parents=True)
+        self.binreal = self.tmp / "usr-bin"
+        fake_bin(self.binreal, "claude-desktop")
+        self.desk = self.write(self.sys, "applications/com.anthropic.Claude.desktop",
+                               "[Desktop Entry]\nName=Claude\nExec=claude-desktop %U\nMimeType=x-scheme-handler/claude;\n"
+                               "Actions=NewChat;\n\n[Desktop Action NewChat]\nName=New Chat\n"
+                               "Exec=claude-desktop \"claude://claude.ai/new\"\n")
+        self.write(self.sys, "applications/other.desktop", "[Desktop Entry]\nName=Other\nExec=other %U\n")
+        self.app = self.base / "engines/claude-desktop"
+        self.write(self.app, "config.json", "{}\n")
+        (self.home / ".config").mkdir()
+        (self.home / ".config/Claude").symlink_to(self.app)
+        self.write(self.home, ".config/autostart/claude.desktop", "[Desktop Entry]\nExec=claude-desktop --hidden\n")
+        (self.base / "engines.json").write_text(json.dumps({"engines": {"claude-desktop": {
+            "tool": "claude-desktop", "mode": "adopted", "link": True, "from": "~/.config/Claude"}}}))
+        self.env = {"XDG_DATA_DIRS": str(self.sys), "PATH": os.pathsep.join([str(self.home / ".local/bin"),
+                                                                             str(self.binreal), self.path()])}
+
+    def pin(self, *a):
+        return self.hb("engine", "pin", "claude-desktop", *a, "--base", str(self.base), env=self.env)
+
+    def test_pin_writes_overrides_wrapper_autostart_and_guard_then_undo(self):
+        home0 = ltree(self.home)
+        out = self.hb("doctor", "--base", str(self.base), env=self.env).stdout
+        self.assertRegex(out, r"WARN\s+~/\.config/Claude: .*a link where a setting exists.*engine pin claude-desktop")
+        r = self.pin()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        flag = f"--user-data-dir={self.app}"
+        ov = (self.home / ".local/share/applications/com.anthropic.Claude.desktop").read_text()
+        self.assertIn(f"Exec=claude-desktop {flag} %U", ov)
+        self.assertIn(f"Exec=claude-desktop {flag} \"claude://claude.ai/new\"", ov)
+        self.assertIn("MimeType=x-scheme-handler/claude;", ov, "only Exec changes")
+        self.assertFalse((self.home / ".local/share/applications/other.desktop").exists())
+        w = self.home / ".local/bin/claude-desktop"
+        self.assertIn(flag, w.read_text())
+        self.assertIn(str(self.binreal / "claude-desktop"), w.read_text(), "the real program, not itself")
+        self.assertIn(flag, (self.home / ".config/autostart/claude.desktop").read_text())
+        g = self.home / ".config/Claude"
+        self.assertFalse(g.is_symlink())
+        self.assertEqual((g.stat().st_size, g.stat().st_mode & 0o777), (0, 0))
+        out = self.hb("doctor", "--base", str(self.base), env=self.env).stdout
+        self.assertNotRegex(out, r"(ERROR|WARN).*\.config/Claude")
+        # a package update changes the system file: watch refreshes the override
+        self.desk.write_text(self.desk.read_text().replace("Name=Claude\n", "Name=Claude 2\n"))
+        self.hb("watch", "--once", "--no-commit", "--base", str(self.base), env=self.env)
+        ov = (self.home / ".local/share/applications/com.anthropic.Claude.desktop").read_text()
+        self.assertIn("Name=Claude 2", ov)
+        self.assertIn(flag, ov)
+        # the guard replaced by a real folder: ERROR with the fix
+        os.chmod(g, 0o600); g.unlink(); g.mkdir()
+        out = self.hb("doctor", "--base", str(self.base), env=self.env).stdout
+        self.assertRegex(out, r"ERROR\s+~/\.config/Claude: .*pinned.*real folder")
+        g.rmdir()
+        r = self.hb("engine", "pin", "claude-desktop", "--base", str(self.base), env=self.env)  # guard again
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = self.pin("--undo")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(ltree(self.home), home0)
+
+    def test_a_tool_with_no_known_setting_keeps_its_link(self):
+        h = self.base / "engines/hermes-desktop"
+        h.mkdir()
+        (self.home / ".config/Hermes").symlink_to(h)
+        reg = json.loads((self.base / "engines.json").read_text())
+        reg["engines"]["hermes-desktop"] = {"tool": "hermes-desktop", "mode": "adopted", "link": True,
+                                            "from": "~/.config/Hermes"}
+        (self.base / "engines.json").write_text(json.dumps(reg))
+        r = self.hb("engine", "pin", "hermes-desktop", "--base", str(self.base), env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no setting", r.stdout + r.stderr)
+        self.assertTrue((self.home / ".config/Hermes").is_symlink())
+        out = self.hb("doctor", "--base", str(self.base), env=self.env).stdout
+        self.assertRegex(out, r"OK\s+~/\.config/Hermes: link into engines/hermes-desktop")
+
+
+class PinnedGuardTests(PinTests):
+    def test_doctor_errors_on_a_missing_guard_a_link_or_a_folder(self):
+        self.ok("engine", "pin", "claude-code", "--base", str(self.base))
+        g = self.home / ".claude"
+        os.chmod(g, 0o600); g.unlink()
+        out = self.hb("doctor", "--base", str(self.base), env={"CLAUDE_CONFIG_DIR": str(self.cl)}).stdout
+        self.assertRegex(out, r"ERROR\s+~/\.claude: pinned.*guard file is missing -> brain\.py engine pin claude-code")
+        g.symlink_to(self.cl)
+        out = self.hb("doctor", "--base", str(self.base), env={"CLAUDE_CONFIG_DIR": str(self.cl)}).stdout
+        self.assertRegex(out, r"ERROR\s+~/\.claude: pinned.*a link")
+
+
+class UnitPinTests(ToolHome):
+    """1.7.0 P3: units live in ops/systemd and the user manager finds them through SYSTEMD_UNIT_PATH (a root
+    drop-in the owner writes once); then the links go and the enable links point at ops/systemd."""
+
+    def setUp(self):
+        super().setUp()
+        self.up = self.tmp / "unitpath"
+        p = self.bin / "systemctl"
+        p.write_text("#!/bin/sh\nif [ \"$2\" = show ]; then echo \"UnitPath=$(cat %s 2>/dev/null)\"; fi\n" %
+                     shq_(self.up))
+        p.chmod(0o755)
+        self.u = self.home / ".config/systemd/user"
+        self.write(self.u, "team-a.service", "[Service]\nExecStart=/bin/true\n[Install]\nWantedBy=default.target\n")
+        (self.u / "default.target.wants").mkdir()
+        (self.u / "default.target.wants/team-a.service").symlink_to(self.u / "team-a.service")
+        self.ok("engine", "adopt-units", "--base", str(self.base))
+        self.ops = self.base / "ops/systemd"
+
+    def test_prints_the_root_step_then_removes_links_once_the_manager_sees_the_path(self):
+        self.up.write_text(f"{self.home}/.config/systemd/user /usr/lib/systemd/user")
+        r = self.ok("engine", "pin-units", "--base", str(self.base))
+        self.assertIn("sudo", r.stdout)
+        self.assertIn(f"SYSTEMD_UNIT_PATH={self.ops}:", r.stdout)
+        self.assertIn("user@.service.d/skeleton-base-units.conf", r.stdout)
+        self.assertTrue((self.u / "team-a.service").is_symlink(), "nothing changes before the manager sees it")
+        self.up.write_text(f"{self.ops} {self.home}/.config/systemd/user /usr/lib/systemd/user")
+        r = self.ok("engine", "pin-units", "--base", str(self.base))
+        self.assertFalse(os.path.lexists(self.u / "team-a.service"), r.stdout)
+        w = self.u / "default.target.wants/team-a.service"
+        self.assertEqual(os.readlink(w), str(self.ops / "team-a.service"), "the enable link points at ops/systemd")
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertNotRegex(out, r"(ERROR|OUTSIDE).*team-a")
+        self.write(self.u, "team-a.service", "[Service]\nExecStart=/bin/false\n")      # an installer writes it again
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertRegex(out, r"ERROR\s+~/\.config/systemd/user/team-a\.service: .*pinned")
+        self.ok("watch", "--once", "--no-commit", "--base", str(self.base))
+        self.assertFalse(os.path.lexists(self.u / "team-a.service"), "adopted again, no link")
+        self.assertEqual((self.ops / "team-a.service").read_text(), "[Service]\nExecStart=/bin/false\n")
+        r = self.ok("engine", "pin-units", "--undo", "--base", str(self.base))
+        self.assertTrue((self.u / "team-a.service").is_symlink())
+        self.assertIn("sudo rm", r.stdout)
+
+
+class PresetTests(ToolHome):
+    """1.7.0 Q1: a tool that is not installed yet is born in the base: its own variable is pre-set."""
+
+    def test_absent_tools_get_their_variable_and_no_folder(self):
+        self.ok("connect")
+        env = (self.home / ".config/environment.d/60-base-engines.conf").read_text()
+        prof = (self.home / ".profile").read_text()
+        for var, name in (("CODEX_HOME", "codex"), ("CLAUDE_CONFIG_DIR", "claude"), ("HERMES_HOME", "hermes"),
+                          ("GEMINI_CLI_HOME", "gemini"), ("COPILOT_HOME", "copilot")):
+            self.assertIn(f"{var}={self.base / 'engines' / name}", env, var)
+            self.assertIn(var, prof, var)
+            self.assertFalse((self.base / "engines" / name).exists(), f"no empty engines/{name}")
+        self.assertNotIn("XDG_", env)
+        out = self.hb("doctor", "--base", str(self.base)).stdout
+        self.assertNotRegex(out, r"Codex|Gemini CLI|Hermes")
+        self.ok("disconnect")
+        self.assertFalse((self.home / ".profile").exists())
+        self.assertFalse((self.home / ".config/environment.d/60-base-engines.conf").exists())
+
+    def test_a_tool_installed_outside_is_not_preset(self):
+        self.bins("codex")
+        self.write(self.home, ".codex/config.toml", 'model = "x"\n')
+        self.ok("connect")
+        self.assertNotIn("CODEX_HOME", (self.home / ".config/environment.d/60-base-engines.conf").read_text())
+
+    def test_a_preset_tool_that_appears_is_registered(self):
+        self.ok("connect")
+        ch = self.base / "engines/codex"
+        self.write(ch, "config.toml", 'model = "x"\n')                   # its first run made it in the base
+        self.bins("codex")
+        r = self.hb("engine", "adopt", "codex", "--base", str(self.base), env={"CODEX_HOME": str(ch)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        e = json.loads((self.base / "engines.json").read_text())["engines"]["codex"]
+        self.assertEqual((e["mode"], e["env"]), ("adopted", "CODEX_HOME"))
+
+
+class AutoAdoptUnknownTests(WatchBase):
+    """1.7.0 Q2: a new AI folder that appears in HOME is adopted into engines/ by watch (no setting known: a link,
+    reported); learned for next time; disconnect gives it back."""
+
+    def test_new_ai_folder_is_adopted_and_given_back(self):
+        self.ok("connect")
+        self.ok("watch", "--once", "--no-commit")                            # first run: what is there stays
+        self.write(self.home, ".newai/AGENTS.md", "# rules\n")
+        self.write(self.home, ".newai/memories/m.md", "- a fact\n")
+        r = self.ok("watch", "--once", "--no-commit")
+        d = self.home / ".newai"
+        self.assertTrue(d.is_symlink(), r.stdout)
+        self.assertEqual(os.path.realpath(d), str((self.base / "engines/newai").resolve()))
+        e = json.loads((self.base / "engines.json").read_text())["engines"]["newai"]
+        self.assertTrue(e.get("auto") and e.get("link"))
+        learned = json.loads((self.base / ".brain/learned-tools.json").read_text())
+        self.assertIn(".newai", learned)
+        self.assertIn("no setting known", (self.base / ".brain/watch.json").read_text() + r.stdout +
+                      (self.base / ".brain/learned-tools.json").read_text())
+        self.ok("disconnect")
+        self.assertTrue(d.is_dir() and not d.is_symlink())
+        self.assertEqual((d / "memories/m.md").read_text(), "- a fact\n")
+
+    def test_a_busy_folder_waits(self):
+        self.ok("connect")
+        self.ok("watch", "--once", "--no-commit")
+        self.write(self.home, ".busyai/AGENTS.md", "# rules\n")
+        p = subprocess.Popen(["sleep", "30"], cwd=self.home / ".busyai")
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        self.ok("watch", "--once", "--no-commit")
+        self.assertFalse((self.home / ".busyai").is_symlink())
+        p.kill(); p.wait()
+        self.ok("watch", "--once", "--no-commit")
+        self.assertTrue((self.home / ".busyai").is_symlink(), "retried on a later run")
+
+    def test_a_folder_without_ai_signals_is_never_moved(self):
+        self.ok("connect")
+        self.ok("watch", "--once", "--no-commit")
+        self.write(self.home, ".plain/data.bin", "x\n")
+        self.ok("watch", "--once", "--no-commit")
+        self.assertFalse((self.home / ".plain").is_symlink())

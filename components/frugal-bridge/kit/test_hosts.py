@@ -582,3 +582,58 @@ def test_absent_tool_not_listed_and_record_dropped(home, monkeypatch, capsys):
     reg = json.loads((home / ".frugal-bridge" / "global.json").read_text())
     assert "gemini" not in (reg.get("tools") or {}) and "gemini" not in (reg.get("native_hooks") or [])
     assert "claude-code" in reg["tools"]
+
+
+# ------------------------------------------------------------------ skills: each tool's own folder; the shared one only when needed
+KIT_SKILLS = os.path.join(HERE, "skills")
+
+
+def test_codex_skills_in_its_own_folder_not_the_shared_one(home, monkeypatch):
+    FH.build(home, ["codex"], monkeypatch, S, HOSTS)
+    assert install("codex") == 0
+    assert (home / ".codex" / "skills" / "frugal-delegate" / "SKILL.md").exists()
+    assert not (home / ".agents" / "skills").exists()
+
+
+def test_shared_copy_removed_when_no_installed_host_needs_it(home, monkeypatch, capsys):
+    FH.build(home, ["gemini"], monkeypatch, S, HOSTS)
+    assert install("gemini") == 0
+    shared = home / ".agents" / "skills"
+    assert (shared / "frugal-delegate" / "SKILL.md").exists()
+    (shared / "mine").mkdir(); (shared / "mine" / "SKILL.md").write_text("my own skill\n")
+    monkeypatch.setattr(S.shutil, "which", lambda b: None)
+    install()                                              # gemini gone: nothing installed reads the shared folder
+    for sk in os.listdir(KIT_SKILLS):
+        assert not (shared / sk).exists(), sk
+    assert (shared / "mine" / "SKILL.md").read_text() == "my own skill\n"     # the user's skill stays
+    assert list((home / ".frugal-bridge" / "backup").rglob("frugal-delegate/SKILL.md"))   # backed up first
+
+
+def test_shared_copy_kept_while_an_installed_host_reads_it(home, monkeypatch):
+    FH.build(home, ["gemini", "codex"], monkeypatch, S, HOSTS)
+    assert install("gemini", "codex") == 0
+    assert install("gemini", "codex") == 0                 # refresh: gemini still reads the shared folder
+    assert (home / ".agents" / "skills" / "frugal-delegate" / "SKILL.md").exists()
+    assert (home / ".codex" / "skills" / "frugal-delegate" / "SKILL.md").exists()
+
+
+def test_user_edited_shared_copy_kept(home, monkeypatch):
+    FH.build(home, ["gemini"], monkeypatch, S, HOSTS)
+    assert install("gemini") == 0
+    f = home / ".agents" / "skills" / "frugal-delegate" / "SKILL.md"
+    f.write_text("my edit\n")
+    monkeypatch.setattr(S.shutil, "which", lambda b: None)
+    install()
+    assert f.read_text() == "my edit\n"
+
+
+def test_old_shared_copy_identical_to_kit_removed_empty_folder_left(home, monkeypatch):
+    """An older Frugal wrote the skills to ~/.agents/skills; codex now uses its own folder and nothing else reads it."""
+    sk = home / ".agents" / "skills" / "frugal-delegate"
+    sk.mkdir(parents=True)
+    sk.joinpath("SKILL.md").write_text(open(os.path.join(KIT_SKILLS, "frugal-delegate", "SKILL.md")).read())
+    FH.build(home, ["codex"], monkeypatch, S, HOSTS)
+    assert install("codex") == 0
+    assert not sk.exists()
+    assert (home / ".agents" / "skills").is_dir()          # left for Skeleton Base to remove
+    assert (home / ".codex" / "skills" / "frugal-delegate" / "SKILL.md").exists()
