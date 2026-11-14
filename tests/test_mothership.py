@@ -21,7 +21,7 @@ REPO = Path(__file__).resolve().parent.parent
 SB_VENDOR = REPO / "components" / "skeleton-base"
 FB_VENDOR = REPO / "components" / "frugal-bridge"
 frugal_quoted = "def parse_base_path" in (FB_VENDOR / "kit" / "setup.py").read_text()   # reads quoted Path: lines
-SCRUB = ("HERMES_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "FRUGAL_HOME", "FRUGAL_BRIDGE_KIT", "FRUGAL_BRIDGE_SRC",
+SCRUB = ("SYSTEMD_UNIT_PATH", "HERMES_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "FRUGAL_HOME", "FRUGAL_BRIDGE_KIT", "FRUGAL_BRIDGE_SRC",
          "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "MOTHERSHIP_HOME",
          "MOTHERSHIP_PLATFORM", "MOTHERSHIP_TEST_FAIL", "MOTHERSHIP_TEST_KILL", "BRAIN_ROOT", "HERMES_AGENT",
          "OPENCLAW_HOME", "OPENCLAW_STATE_DIR", "COPILOT_HOME", "GEMINI_CLI_HOME", "MY_SETUP_SOURCES_DIR")

@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.14 (2026-11-14)
+
+- Skeleton Base 1.7.3 `ba96868`: doctor finds the Syncthing drop-in in the base's unit folder; a pinned file path is
+  guarded by a locked folder, which a program's atomic rename cannot replace. Tests scrub SYSTEMD_UNIT_PATH.
+
 ## v1.2.13 (2026-11-14)
 
 - Skeleton Base 1.7.2 `abed2d4`: the rules block every tool loads says where new projects and files go
