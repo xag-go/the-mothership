@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.2.18 (2026-11-15)
+
+- `install.py offsite`: one encrypted archive of the vault, the base's registry files and the newest entry of each
+  backup folder (capped, 500 MB by default; never the base itself) in a folder of its own outside the base (default
+  `~/offsite-copy`, mode 700). Encrypted with `age` when it is installed, else `openssl` AES-256 (PBKDF2), using a
+  passphrase file made on the first run (default `~/.config/the-mothership/offsite.key`, mode 600; refused inside
+  the base, the vault or the off-site folder; its content is never printed). The archive is streamed into the
+  cipher (no clear copy on disk) and read back with the passphrase file before it is kept. The newest 3 are kept.
+  The first run prints the exact Syncthing steps for the other machine (send-only, or "Untrusted (Encrypted)") and
+  writes `wiki/sops/restore.md` into the base (once; then it is yours). `offsite --restore ARCHIVE --to DIR` unpacks
+  one archive into an empty folder; `docs/RESTORE.md` has the steps.
+- A daily timer for it (`the-mothership-offsite.timer`) is written by install and not enabled; `offsite --timer`
+  enables it after a first copy. `install.py check` warns (`WARN`, exit 0) when the newest copy is older than 2 days.
+- `install.py boot-check` and `the-mothership-boot-check.service` (oneshot after boot, enabled with `--yes`): waits
+  for a default route, runs `brain.py doctor` and `systemctl --user --failed`, adds the off-site warning, and sends
+  the result to the base's notify command (`.brain/notify.json`) when one is set.
+- Uninstall disables and removes these units and its off-site settings; the archives and the passphrase file stay.
+
 ## v1.2.17 (2026-11-15)
 
 - Skeleton Base 1.7.6 `dbb3b2e`: `engine pin-units` removes every link into the base's unit folder, whoever made it,

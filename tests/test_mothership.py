@@ -1395,6 +1395,403 @@ class ComponentSuiteTests(Base):
         print(f"\n  frugal-bridge vendored suite: {out.strip().splitlines()[-1]}", file=sys.stderr)
 
 
+OPENSSL = shutil.which("openssl")
+FAKE_AGE = """#!{py}
+import sys
+a = sys.argv[1:]
+key = a[a.index("-i") + 1]
+assert "AGE-SECRET-KEY-" in open(key).read(), "not an age key"
+if "-d" in a:
+    data = open(a[-1], "rb").read()
+    assert data.startswith(b"age-fake\\n")
+    sys.stdout.buffer.write(bytes(b ^ 0x5A for b in data[9:]))
+else:
+    out = a[a.index("-o") + 1]
+    open(out, "wb").write(b"age-fake\\n" + bytes(b ^ 0x5A for b in sys.stdin.buffer.read()))
+"""
+FAKE_AGE_KEYGEN = """#!{py}
+import os, sys
+out = sys.argv[sys.argv.index("-o") + 1]
+fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+os.write(fd, b"# created: 2026-11-15T00:00:00Z\\n# public key: age1fake\\nAGE-SECRET-KEY-1FAKEFAKEFAKE\\n")
+"""
+FAKE_SYSTEMCTL_FAILED = """#!/bin/sh
+echo "$@" >> "$FAKE_SD_LOG"
+case "$2" in
+  show-environment) echo HOME=x; exit 0;;
+  --failed) echo "broken-thing.service loaded failed failed Something that broke"; exit 0;;
+  is-enabled) echo disabled; exit 1;;
+  is-active) echo active; exit 0;;
+  *) exit 0;;
+esac
+"""
+VAULT_TEXT = "only-in-the-vault-9f3a"
+
+
+@unittest.skipUnless(OPENSSL, "needs the openssl program")
+class OffsiteTests(Base):
+    """install.py offsite: one encrypted archive of the vault + the newest backups, in a folder of its own."""
+
+    def setUp(self):
+        super().setUp()
+        (self.bin / "openssl").symlink_to(OPENSSL)
+        self.vault = self.home / ".skeleton-base-home-secret"      # Skeleton Base's default vault for this base
+        self.off = self.home / "offsite-copy"
+        self.key = self.home / ".config/the-mothership/offsite.key"
+
+    def fill(self):
+        (self.vault / "claude").mkdir(parents=True)
+        os.chmod(self.vault, 0o700)
+        (self.vault / "claude/.credentials.json").write_text(json.dumps({"value": VAULT_TEXT}))
+        os.chmod(self.vault / "claude/.credentials.json", 0o600)
+        os.symlink(".credentials.json", self.vault / "claude/link-to-credentials")
+        b = self.base / ".brain/backups"
+        for k in (b.iterdir() if b.is_dir() else []):                  # the install's own backups: older than ours
+            os.utime(k, (1, 1))
+        (b / "connect-old").mkdir(parents=True, exist_ok=True)
+        (b / "connect-old/settings.json").write_text("OLD")
+        (b / "connect-new").mkdir()
+        (b / "connect-new/settings.json").write_text("NEW")
+        for name, age in (("connect-old", 5000), ("connect-new", 10)):
+            t = __import__("time").time() - age
+            os.utime(b / name, (t, t))
+        for d in (self.base / ".base-folder/backup", self.base / ".frugal-bridge/backup"):
+            for k in (d.iterdir() if d.is_dir() else []):          # the install's own backups: older than ours
+                os.utime(k, (1, 1))
+        big = self.home / "skeleton-base-backups"
+        big.mkdir(exist_ok=True)
+        (big / "whole-base.tar.gz").write_bytes(os.urandom(1024) * 2100)     # 2.1 MB: over a 1 MB cap
+
+    def archives(self, d=None):
+        return sorted(f for f in (d or self.off).iterdir() if re.match(r"offsite-.*\.tar\.gz\.(enc|age)$", f.name))
+
+    def test_one_encrypted_archive_and_it_restores(self):
+        self.ms("--yes")
+        self.fill()
+        out = self.ms("offsite", "--max-mb", 1)
+        arcs = self.archives()
+        self.assertEqual(len(arcs), 1, out)
+        a = arcs[0]
+        self.assertTrue(a.name.startswith("offsite-skeleton-base-home-") and a.name.endswith(".tar.gz.enc"))
+        self.assertEqual(self.off.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(a.stat().st_mode & 0o777, 0o600)
+        data = a.read_bytes()
+        self.assertTrue(data.startswith(b"Salted__"))                        # openssl enc with a salt
+        self.assertNotIn(VAULT_TEXT.encode(), data)
+        self.assertNotIn(b"credentials", data)
+        self.assertEqual((self.off / (a.name + ".sha256")).read_text().split()[0], hashlib.sha256(data).hexdigest())
+        self.assertFalse([f for f in self.off.iterdir() if f.name.endswith(".part")])
+        # the passphrase file: made once, mode 600, outside the base, the vault and the folder; never printed
+        self.assertEqual(self.key.stat().st_mode & 0o777, 0o600)
+        secret = self.key.read_text().strip()
+        self.assertGreater(len(secret), 40)
+        self.assertNotIn(secret, out)
+        self.assertIn(f"passphrase file created: {self.key}", out)
+        self.assertIn("COPY IT NOW", out)
+        for root in (self.base, self.vault, self.off):
+            self.assertFalse([f for f in root.rglob("*") if f.is_file() and not f.is_symlink()
+                              and secret.encode() in f.read_bytes()], root)
+        # what went in and what was left out
+        self.assertIn(f"+ vault  <-  {self.vault}", out)
+        self.assertIn("+ backups/base-brain-backups/connect-new", out)
+        self.assertNotIn("connect-old", out)
+        self.assertIn("left out:", out)
+        self.assertIn("whole-base.tar.gz is 2.2 MB", out)
+        # the steps for the other machine, both ways; Syncthing itself is never called (it is not installed here)
+        for want in ("Folder Type: Send Only", "Folder Type: Receive Only", "Untrusted (Encrypted)", "Receive Encrypted",
+                     "NOT found on PATH here", f"Folder Path {self.off}", "the-mothership-offsite.timer"):
+            self.assertIn(want, out)
+        # restore: the tool's own command
+        dest = self.tmp / "restored"
+        out = self.ms("offsite", "--restore", a, "--to", dest)
+        self.assertIn(f"restored", out)
+        self.assertEqual(json.loads((dest / "vault/claude/.credentials.json").read_text())["value"], VAULT_TEXT)
+        self.assertEqual((dest / "vault/claude/.credentials.json").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(os.readlink(dest / "vault/claude/link-to-credentials"), ".credentials.json")
+        self.assertEqual((dest / "backups/base-brain-backups/connect-new/settings.json").read_text(), "NEW")
+        self.assertFalse((dest / "backups/base-brain-backups/connect-old").exists())
+        self.assertFalse((dest / "backups/home-skeleton-base-backups").exists())
+        self.assertTrue((dest / "base-state/.mothership.json").is_file())
+        man = (dest / "MANIFEST.txt").read_text()
+        self.assertIn("whole-base.tar.gz", man)
+        self.assertFalse((dest / "skeleton-base-home").exists())            # never the base itself
+        self.assertEqual(dest.stat().st_mode & 0o777, 0o700)
+        # restore without The Mothership: the documented openssl line
+        r = subprocess.run([OPENSSL, "enc", "-aes-256-cbc", "-pbkdf2", "-iter", "600000", "-md", "sha256", "-d",
+                            "-pass", f"file:{self.key}", "-in", str(a)], capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        import io, tarfile
+        with tarfile.open(fileobj=io.BytesIO(r.stdout), mode="r:gz") as tar:
+            self.assertIn("vault/claude/.credentials.json", tar.getnames())
+        page = (self.base / "wiki/sops/restore.md").read_text()
+        self.assertIn("openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -d -pass file:KEYFILE -in ARCHIVE", page)
+
+    def test_restore_refuses_a_folder_with_files_a_wrong_key_and_a_damaged_archive(self):
+        self.ms("--yes")
+        self.fill()
+        self.ms("offsite")
+        a = self.archives()[0]
+        full = self.tmp / "full"
+        full.mkdir()
+        (full / "mine.txt").write_text("x")
+        self.assertIn("is not empty", self.ms("offsite", "--restore", a, "--to", full, rc=2))
+        self.assertEqual([f.name for f in full.iterdir()], ["mine.txt"])
+        self.assertIn("unpack somewhere else", self.ms("offsite", "--restore", a, "--to", self.vault / "x", rc=2))
+        wrong = self.tmp / "wrong.key"
+        wrong.write_text("not the passphrase\n")
+        out = self.ms("offsite", "--restore", a, "--to", self.tmp / "r1", "--passphrase-file", wrong, rc=2)
+        self.assertIn("could not be", out)
+        self.assertFalse((self.tmp / "r1").exists())
+        bad = self.tmp / "copy" / a.name
+        bad.parent.mkdir()
+        bad.write_bytes(a.read_bytes()[:-64] + b"x" * 64)
+        shutil.copy(self.off / (a.name + ".sha256"), bad.parent)
+        self.assertIn("is damaged", self.ms("offsite", "--restore", bad, "--to", self.tmp / "r2", rc=2))
+        self.assertFalse((self.tmp / "r2").exists())
+
+    def test_passphrase_file_or_folder_in_a_wrong_place_is_refused_and_nothing_is_written(self):
+        self.ms("--yes")
+        self.fill()
+        t0 = tree(self.home)
+        for where, what in ((self.base / "private/offsite.key", "the base"), (self.vault / "offsite.key", "the vault"),
+                            (self.off / "offsite.key", "the off-site folder")):
+            out = self.ms("offsite", "--passphrase-file", where, rc=2)
+            self.assertIn(f"is inside {what}", out)
+            self.assertIn("nothing was written", out)
+        link = self.home / "innocent.key"                                     # a link into the vault is the vault
+        os.symlink(self.vault / "claude/.credentials.json", link)
+        self.assertIn("is inside the vault", self.ms("offsite", "--passphrase-file", link, rc=2))
+        link.unlink()
+        for d, what in ((self.base / "offsite", "the base"), (self.vault / "copies", "the vault"),
+                        (self.home, "home folder")):
+            out = self.ms("offsite", "--offsite-dir", d, rc=2)
+            self.assertIn(what, out)
+        self.assertEqual(tree(self.home), t0)
+
+    def test_without_age_or_openssl_it_says_so_and_writes_nothing(self):
+        self.ms("--yes")
+        self.fill()
+        (self.bin / "openssl").unlink()
+        t0 = tree(self.home)
+        out = self.ms("offsite", rc=2)
+        self.assertIn("needs openssl on PATH", out)
+        self.assertEqual(tree(self.home), t0)
+
+    def test_age_is_used_when_it_is_installed(self):
+        for name, text in (("age", FAKE_AGE), ("age-keygen", FAKE_AGE_KEYGEN)):
+            (self.bin / name).write_text(text.format(py=sys.executable))
+            (self.bin / name).chmod(0o755)
+        self.ms("--yes")
+        self.fill()
+        out = self.ms("offsite")
+        a = self.archives()[0]
+        self.assertTrue(a.name.endswith(".tar.gz.age"), out)
+        self.assertIn("AGE-SECRET-KEY-", self.key.read_text())
+        self.assertNotIn("AGE-SECRET-KEY-", out)
+        self.assertEqual(self.key.stat().st_mode & 0o777, 0o600)
+        self.assertIn("age -d -i KEYFILE ARCHIVE", (self.base / "wiki/sops/restore.md").read_text())
+        dest = self.tmp / "r"
+        self.ms("offsite", "--restore", a, "--to", dest)
+        self.assertEqual(json.loads((dest / "vault/claude/.credentials.json").read_text())["value"], VAULT_TEXT)
+        self.assertIn("cannot be used with openssl", self.ms("offsite", "--cipher", "openssl", rc=2))
+
+    def test_keeps_the_newest_archives_and_the_first_runs_choices(self):
+        self.ms("--yes")
+        self.fill()
+        other = self.home / "copies-for-the-laptop"
+        self.ms("offsite", "--offsite-dir", other, "--keep", 2)
+        first = self.archives(other)[0]
+        os.utime(first, (1000, 1000))
+        self.ms("offsite")                                   # no flags: the folder and --keep of the first run
+        self.ms("offsite")
+        left = self.archives(other)
+        self.assertEqual(len(left), 2)
+        self.assertNotIn(first, left)
+        self.assertFalse((other / (first.name + ".sha256")).exists())
+        self.assertFalse(self.off.exists())
+        mine = other / "my-own-file.txt"                     # anything that is not our archive is never deleted
+        mine.write_text("keep")
+        self.ms("offsite", "--keep", 1)
+        self.assertTrue(mine.is_file())
+        self.assertEqual(len(self.archives(other)), 1)
+
+    def test_check_warns_when_the_newest_copy_is_older_than_two_days(self):
+        self.ms("--yes")
+        self.fill()
+        out = self.ms("check")
+        self.assertNotIn("off-site", out)                    # not set up: nothing to warn about
+        self.assertIn("off-site copy: not set up", self.ms("status"))
+        self.ms("offsite")
+        out = self.ms("check")
+        self.assertIn("check: OK", out)
+        self.assertNotIn("WARN off-site", out)
+        a = self.archives()[0]
+        t = __import__("time").time() - 3 * 86400
+        os.utime(a, (t, t))
+        out = self.ms("check")                               # a warning: exit 0
+        self.assertIn("WARN off-site copy: the newest copy", out)
+        self.assertIn("3.0 days old (limit 2)", out)
+        self.assertIn("check: OK, 1 warning(s)", out)
+        a.unlink()
+        self.assertIn("WARN off-site copy: no archive in", self.ms("check"))
+        self.ms("offsite")
+        self.assertNotIn("WARN off-site", self.ms("check"))
+        st = self.ms("status")
+        self.assertIn(f"off-site copy: {self.off} (1 archive(s), openssl", st)
+        self.assertIn("daily timer not enabled", st)
+
+    def test_restore_page_is_written_once_and_passes_lint(self):
+        self.ms("--yes")
+        self.fill()
+        page = self.base / "wiki/sops/restore.md"
+        self.assertFalse(page.exists())                      # install alone writes no page
+        out = self.ms("offsite")
+        self.assertIn(f"restore steps written to {page}", out)
+        t = page.read_text()
+        self.assertTrue(t.startswith("---\ntitle: Restore from the off-site copy\n"))
+        for want in (str(self.off), str(self.vault), "offsite --restore ARCHIVE", "MANIFEST.txt", "scope: private"):
+            self.assertIn(want, t)
+        self.assertIn("[[restore]]", (self.base / "wiki/index.md").read_text())
+        chk = self.ms("check")
+        self.assertIn("check: OK", chk)
+        self.assertNotIn("restore.md", chk)                  # no lint warning about it
+        page.write_text(t + "\nMy own note about the spare disk.\n")
+        self.ms("offsite")
+        self.assertIn("My own note about the spare disk.", page.read_text())
+
+    def test_units_are_written_not_enabled_and_uninstall_removes_them_but_keeps_the_copies(self):
+        self.fake_systemctl()
+        t0 = tree(self.home)
+        out = self.ms("--yes")
+        ud = self.home / ".config/systemd/user"
+        for u in ("the-mothership-offsite.service", "the-mothership-offsite.timer", "the-mothership-boot-check.service"):
+            self.assertTrue((ud / u).is_file(), u)
+        payload = self.home / ".local/share/the-mothership/payload/install.py"
+        svc = (ud / "the-mothership-offsite.service").read_text()
+        self.assertIn(f"ExecStart=/usr/bin/env python3 {payload} offsite --base {self.base}\n", svc)
+        self.assertIn(f"WorkingDirectory={self.base}\n", svc)
+        self.assertIn("OnCalendar=daily", (ud / "the-mothership-offsite.timer").read_text())
+        boot = (ud / "the-mothership-boot-check.service").read_text()
+        self.assertIn(f"{payload} boot-check --base {self.base} --wait 180 --settle 90\n", boot)
+        self.assertIn("Type=oneshot", boot)
+        self.assertIn("After=network-online.target", boot)
+        self.assertIn("WantedBy=default.target", boot)
+        log = self.sd_log.read_text()
+        self.assertIn("--user enable the-mothership-boot-check.service", log)
+        self.assertNotIn("the-mothership-offsite", log)                       # the copy timer waits for its set-up
+        self.assertIn("check after boot: enabled the-mothership-boot-check.service", out)
+        self.assertIn("check: OK", self.ms("check"))
+        self.fill()
+        out = self.ms("offsite", "--timer")
+        self.assertIn("daily copy: enabled the-mothership-offsite.timer", out)
+        self.assertIn("--user enable --now the-mothership-offsite.timer", self.sd_log.read_text())
+        self.assertIn("daily timer enabled", self.ms("status"))
+        self.ms("--yes")                                                      # a re-run keeps what is enabled
+        self.assertEqual(self.state()["systemd"]["own_enabled"],
+                         ["the-mothership-boot-check.service", "the-mothership-offsite.timer"])
+        (ud / "the-mothership-boot-check.service").unlink()
+        self.assertIn("the-mothership-boot-check.service is missing (its own unit)", self.ms("check", rc=1))
+        self.ms("--yes")
+        key = self.key.read_bytes()
+        arcs = self.archives()
+        shutil.rmtree(self.vault)
+        shutil.rmtree(self.home / "skeleton-base-backups")
+        self.sd_log.write_text("")
+        out = self.ms("uninstall", "--no-backup")
+        self.assertIn("--user disable --now the-mothership-boot-check.service the-mothership-offsite.timer",
+                      self.sd_log.read_text())
+        self.assertIn(f"your archives in {self.off} and the passphrase file {self.key} are kept", out)
+        self.assertEqual(self.key.read_bytes(), key)                          # yours: kept
+        self.assertEqual(self.archives(), arcs)
+        self.assertFalse((self.home / ".local/share/the-mothership").exists())
+        left = {k: v for k, v in tree(self.home).items()
+                if not k.startswith(("offsite-copy", ".config/the-mothership", "skeleton-base-home"))}
+        self.assertEqual({k: v for k, v in left.items() if k != ".config"},
+                         {k: v for k, v in t0.items() if k != ".config"})
+
+    def test_units_go_where_the_base_keeps_its_pinned_units(self):
+        self.fake_systemctl()
+        self.ms("--yes")
+        ops = self.base / "ops/systemd"
+        ops.mkdir(parents=True)
+        ud = self.home / ".config/systemd/user"
+        shutil.copy(ud / "skeleton-base-watch.service", ops)
+        for u in ("the-mothership-offsite.service", "the-mothership-offsite.timer", "the-mothership-boot-check.service"):
+            (ud / u).unlink()
+        self.ms("--yes")
+        for u in ("the-mothership-offsite.service", "the-mothership-offsite.timer", "the-mothership-boot-check.service"):
+            self.assertTrue((ops / u).is_file(), u)
+            self.assertFalse((ud / u).exists(), u)
+
+    def test_macos_like_has_no_units_and_the_copy_still_works(self):
+        self.ms("--yes", MOTHERSHIP_PLATFORM="darwin")
+        self.fill()
+        out = self.ms("offsite", "--timer", MOTHERSHIP_PLATFORM="darwin")
+        self.assertEqual(len(self.archives()), 1)
+        self.assertIn("no systemd on this system", out)
+        self.assertFalse((self.home / ".config/systemd").exists())
+
+
+class BootCheckTests(Base):
+    """install.py boot-check: doctor + failed user units, sent through the base's notify command."""
+
+    def notify_to(self, rc=0):
+        got = self.tmp / "notified.json"
+        script = self.tmp / "notify.py"
+        script.write_text(f"import sys\nopen({str(got)!r}, 'w').write(sys.stdin.read())\nsys.exit({rc})\n")
+        (self.base / ".brain").mkdir(exist_ok=True)
+        (self.base / ".brain/notify.json").write_text(json.dumps({"command": [sys.executable, str(script)]}))
+        return got
+
+    def test_all_fine_says_ok_and_sends_it(self):
+        self.fake_systemctl()
+        self.ms("--yes")
+        got = self.notify_to()
+        out = self.ms("boot-check")
+        self.assertIn("): OK", out)
+        self.assertIn("doctor: 0 error(s), 0 warning(s)", out)
+        self.assertIn("failed user units: none", out)
+        self.assertIn("notify: sent", out)
+        msg = json.loads(got.read_text())
+        self.assertTrue(msg["title"].startswith("After boot (") and msg["title"].endswith("): OK"), msg)
+        self.assertIn("failed user units: none", msg["text"])
+        self.assertIn("--user --failed --no-legend --plain", self.sd_log.read_text())
+
+    def test_failed_unit_and_stale_copy_are_reported(self):
+        f = self.bin / "systemctl"
+        f.write_text(FAKE_SYSTEMCTL_FAILED)
+        f.chmod(0o755)
+        self.ms("--yes")
+        got = self.notify_to()
+        off = self.home / "offsite-copy"
+        off.mkdir()
+        mh = self.home / ".local/share/the-mothership"
+        (mh / "offsite.json").write_text(json.dumps({"dir": str(off), "key": str(self.home / "k")}))
+        out = self.ms("boot-check")
+        self.assertIn("2 problem(s)", out)
+        msg = json.loads(got.read_text())
+        self.assertIn("2 problem(s)", msg["title"])
+        self.assertIn("failed user units: broken-thing.service", msg["text"])
+        self.assertIn("off-site copy: no archive in", msg["text"])
+
+    def test_no_notify_command_prints_only_and_a_failing_one_exits_1(self):
+        self.fake_systemctl()
+        self.ms("--yes")
+        out = self.ms("boot-check")
+        self.assertIn("notify: none set", out)
+        got = self.notify_to(rc=3)
+        out = self.ms("boot-check", rc=1)
+        self.assertIn("notify: FAILED (exit 3)", out)
+        got.unlink()
+        self.ms("boot-check", "--no-notify")
+        self.assertFalse(got.exists())
+
+    def test_without_systemctl_it_says_so(self):
+        self.ms("--yes")
+        out = self.ms("boot-check")
+        self.assertIn("failed user units: systemctl --user is not reachable", out)
+
+
 class PublicTests(unittest.TestCase):
     def test_lock_matches_vendored_files(self):
         sys.path.insert(0, str(REPO))

@@ -49,6 +49,10 @@ edits vendored files, and the products never depend on The Mothership.
 | install record | `DIR/.mothership.json` | what was installed or adopted, options, created folders and backups |
 | pointer to the base | `$MOTHERSHIP_HOME/installed.json` | so `check`, `status`, `update`, `uninstall` need no arguments |
 | progress journal | `$MOTHERSHIP_HOME/journal.json` | only while an install runs; an interrupted install resumes from it |
+| off-site archives | `~/offsite-copy` (`--offsite-dir`), mode 700 | a folder of its own that another machine pulls; outside the base and the vault, so sharing it shares nothing else |
+| passphrase file | `~/.config/the-mothership/offsite.key` (`--passphrase-file`), mode 600 | must not travel with what it protects: refused inside the base, the vault or the off-site folder |
+| off-site settings | `$MOTHERSHIP_HOME/offsite.json` | the first run's choices and the last copy, so the timer needs no flags |
+| its own units | `~/.config/systemd/user/the-mothership-*.{service,timer}` (the base's `ops/systemd` when Skeleton Base keeps its units there) | the daily off-site copy (written, not enabled) and the check after boot |
 
 Frugal-Bridge is never placed inside the base (the two products stay separate).
 

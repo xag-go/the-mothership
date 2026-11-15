@@ -9,6 +9,12 @@ Usage
   python3 install.py update                     [--base DIR] [--yes] [--force]
   python3 install.py uninstall                  [--base DIR] [--yes] [--keep-backups] [--no-backup] [--backup-dir DIR]
                                                 [--purge [--yes-purge-BASENAME]]
+  python3 install.py offsite                    one encrypted archive (the vault + the newest backups) for another
+                                                machine: [--offsite-dir DIR] [--passphrase-file FILE] [--max-mb N]
+                                                [--keep N] [--cipher age|openssl] [--timer] [--steps]
+  python3 install.py offsite --restore ARCHIVE --to DIR      decrypt and unpack one archive into an empty folder
+  python3 install.py boot-check                 doctor + failed user units, sent to the base's notify command
+                                                [--wait SECONDS] [--settle SECONDS] [--no-notify]
 
 uninstall first writes a full backup of the base (.git and dotfiles too) to ~/skeleton-base-backups/
 NAME-YYYYmmdd-HHMMSS.tar.gz (mode 600) and prints a restore command; it removes only what the products added and
@@ -27,7 +33,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION = "1.2.17"
+VERSION = "1.2.18"
 ROOT = Path(__file__).resolve().parent
 LOCK = "components.lock"
 STATE = ".mothership.json"
@@ -54,6 +60,21 @@ OWNED = {".kits.json", STATE, "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".gitignore
 OWNED_PREFIXES = (".brain/pycache/", "wiki/weekly/")
 STEPS = ("stage", "base-init", "frugal-project", "connect", "frugal-global", "frugal-kit-key", "claude-access", "reconnect",
          "systemd", "checks")
+# off-site copy: one encrypted archive in a folder of its own, outside the base, for another machine to pull
+OFFSITE_DIR = "~/offsite-copy"
+OFFSITE_KEY = "~/.config/the-mothership/offsite.key"   # the passphrase file: never in the base, the vault or the folder
+OFFSITE_CFG = "offsite.json"                           # in $MOTHERSHIP_HOME: the choices of the first run + the last copy
+OFFSITE_MAX_MB = 500                                   # cap for the backup items in one archive (the vault always goes in)
+OFFSITE_KEEP = 3                                       # archives kept in the folder
+OFFSITE_MAX_AGE_DAYS = 2                               # check warns when the newest archive is older
+OFFSITE_RE = re.compile(r"^offsite-.+-\d{8}-\d{6}(?:-\d+)?\.tar\.gz\.(enc|age)$")
+OPENSSL_ENC = ["enc", "-aes-256-cbc", "-pbkdf2", "-iter", "600000", "-md", "sha256"]
+OFFSITE_SERVICE, OFFSITE_TIMER = "the-mothership-offsite.service", "the-mothership-offsite.timer"
+BOOT_UNIT = "the-mothership-boot-check.service"
+OWN_UNITS = (OFFSITE_SERVICE, OFFSITE_TIMER, BOOT_UNIT)
+PINNED_UNITS = "ops/systemd"                           # Skeleton Base 1.7.5+: where a base with pinned units keeps them
+RESTORE_PAGE = "wiki/sops/restore.md"
+BASE_STATE_FILES = (STATE, ".kits.json", "engines.json", "projects.json")
 
 
 class Fail(Exception):
@@ -549,6 +570,465 @@ def systemctl(*args):
         return 1, str(ex)
 
 
+# ------------------------------------------------------------------ off-site copy, own units, notify
+def inside(p, root):
+    """True when p is root or lies under it (both resolved: a link into root counts as inside)."""
+    p, root = Path(p).resolve(), Path(root).resolve()
+    return p == root or root in p.parents
+
+
+def vault_root(base):
+    """Skeleton Base's vault folder: engines.json "vault", else ~/.<base folder name>-secret (its own rule)."""
+    v = (load_json(Path(base) / "engines.json", {}) or {}).get("vault")
+    if isinstance(v, str) and v.strip():
+        return Path(os.path.abspath(os.path.expanduser(v)))
+    return home() / f".{Path(base).resolve().name}-secret"
+
+
+def unit_esc(s):
+    """One word of an ExecStart= / Environment= line: % and $ doubled, quoted when it holds a space or a quote."""
+    s = str(s)
+    if "\n" in s or "\r" in s:
+        raise Fail(f"a path with a line break cannot go into a systemd unit: {s!r}")
+    s = s.replace("%", "%%").replace("$", "$$").replace("\\", "\\\\")
+    return '"' + s.replace('"', '\\"') + '"' if any(c.isspace() for c in s) or any(c in s for c in "\"';") else s
+
+
+def own_unit_dir(base):
+    """Where our units go: the base's ops/systemd when Skeleton Base keeps its own units there (pinned), else the
+    user folder ~/.config/systemd/user."""
+    ops = Path(base) / PINNED_UNITS
+    if any((ops / u).is_file() for u in WATCH_UNITS):
+        return ops
+    return home() / UNIT_DIR
+
+
+def own_unit_texts(base, payload):
+    """Unit name -> text: the off-site copy (service + daily timer) and the check after boot (oneshot)."""
+    inst, b = unit_esc(Path(payload) / "install.py"), unit_esc(base)
+    env = ""
+    if os.environ.get("MOTHERSHIP_HOME") or os.environ.get("XDG_DATA_HOME"):
+        env = "Environment=" + unit_esc(f"MOTHERSHIP_HOME={mothership_home()}") + "\n"
+    head = "Type=oneshot\nWorkingDirectory=" + str(base).replace("%", "%%") + "\n" + env
+    return {
+        OFFSITE_SERVICE: "[Unit]\nDescription=The Mothership: encrypted off-site copy (vault + newest backups)\n\n"
+                         f"[Service]\n{head}ExecStart=/usr/bin/env python3 {inst} offsite --base {b}\n"
+                         "TimeoutStartSec=2h\nNice=10\n",
+        OFFSITE_TIMER: "[Unit]\nDescription=The Mothership: daily off-site copy\n\n"
+                       f"[Timer]\nOnCalendar=daily\nRandomizedDelaySec=30min\nPersistent=true\nUnit={OFFSITE_SERVICE}\n\n"
+                       "[Install]\nWantedBy=timers.target\n",
+        # a user manager has no network-online.target of its own: the command itself waits for a default route
+        BOOT_UNIT: "[Unit]\nDescription=The Mothership: health check after boot (doctor + failed units, sent to the "
+                   "notify command)\nAfter=network-online.target\n\n"
+                   f"[Service]\n{head}ExecStart=/usr/bin/env python3 {inst} boot-check --base {b} --wait 180 "
+                   "--settle 90\nTimeoutStartSec=15min\n\n[Install]\nWantedBy=default.target\n"}
+
+
+def offsite_cfg():
+    c = load_json(mothership_home() / OFFSITE_CFG)
+    return c if isinstance(c, dict) else {}
+
+
+def offsite_archives(d):
+    """Our archives in the off-site folder, oldest first."""
+    d = Path(d)
+    if not d.is_dir():
+        return []
+    fs = [f for f in d.iterdir() if f.is_file() and OFFSITE_RE.match(f.name)]
+    return sorted(fs, key=lambda f: (f.stat().st_mtime_ns, f.name))
+
+
+def offsite_warning(now=None):
+    """None, or why the off-site copy needs a look (only once it was set up: offsite.json exists)."""
+    import time
+    c = offsite_cfg()
+    if not c.get("dir"):
+        return None
+    arcs = offsite_archives(c["dir"])
+    fix = "run `install.py offsite` and look at the timer (systemctl --user status " + OFFSITE_TIMER + ")"
+    if not arcs:
+        return f"no archive in {c['dir']}: {fix}"
+    age = ((now or time.time()) - arcs[-1].stat().st_mtime) / 86400
+    if age > OFFSITE_MAX_AGE_DAYS:
+        return (f"the newest copy ({arcs[-1].name}) is {age:.1f} days old (limit {OFFSITE_MAX_AGE_DAYS}): {fix}")
+    return None
+
+
+def tree_bytes(p):
+    """Bytes of the regular files in p (a file or a folder; links are not followed)."""
+    p = Path(p)
+    if p.is_symlink():
+        return 0
+    if p.is_file():
+        return p.stat().st_size
+    n = 0
+    for cur, dirs, files in os.walk(p):
+        for f in files:
+            try:
+                st = os.lstat(os.path.join(cur, f))
+            except OSError:
+                continue
+            n += st.st_size if os.path.isfile(os.path.join(cur, f)) and not os.path.islink(os.path.join(cur, f)) else 0
+    return n
+
+
+def offsite_plan(base, st, max_bytes, skip=()):
+    """What goes into one archive: [(name in the archive, path)], and [text] for what was left out. The vault whole;
+    the base's small registry files; from each backup folder only its newest entry, while the cap allows. Never
+    the base itself: its notes are synced and in git already."""
+    base = Path(base)
+    items, left_out = [], []
+    v = vault_root(base)
+    if v.is_dir():
+        items.append(("vault", v))
+    else:
+        left_out.append(f"vault: {v} does not exist (nothing to copy from it)")
+    for f in BASE_STATE_FILES:
+        if (base / f).is_file():
+            items.append((f"base-state/{f}", base / f))
+    fh = Path((st or {}).get("frugal_home") or frugal_home())
+    roots = [("frugal-bridge-backup", fh / "backup"), ("base-brain-backups", base / ".brain" / "backups"),
+             ("base-frugal-bridge-backup", base / ".frugal-bridge" / "backup"),
+             ("base-folder-backup", base / ".base-folder" / "backup"), ("base-backups", base / "backups"),
+             ("home-" + BACKUPS_DIR, home() / BACKUPS_DIR)]
+    room = max_bytes
+    for label, r in roots:
+        if not r.is_dir() or any(inside(s, r) for s in skip):
+            continue
+        kids = [k for k in r.iterdir() if not k.is_symlink() and not k.name.startswith(".")]
+        if not kids:
+            continue
+        newest = max(kids, key=lambda k: (k.stat().st_mtime_ns, k.name))
+        size = tree_bytes(newest)
+        if size > room:
+            left_out.append(f"{r}: newest entry {newest.name} is {size / 1e6:.1f} MB, over what is left of the cap "
+                            f"({room / 1e6:.1f} MB): not copied")
+            continue
+        room -= size
+        items.append((f"backups/{label}/{newest.name}", newest))
+    return items, left_out
+
+
+class _Exact:
+    """Reads exactly `size` bytes from a file that may change while it is read (padded with zeros when it shrank)."""
+    def __init__(self, fh, size):
+        self.fh, self.left, self.short = fh, size, 0
+
+    def read(self, n=-1):
+        n = self.left if n is None or n < 0 else min(n, self.left)
+        b = self.fh.read(n)
+        if len(b) < n:
+            self.short += n - len(b)
+            b += b"\0" * (n - len(b))
+        self.left -= n
+        return b
+
+
+def tar_add(tar, src, arc, names, errors):
+    """Add a file or a folder under the name arc. Links stay links; a file that cannot be read is noted, not fatal."""
+    def one(pth, name):
+        try:
+            ti = tar.gettarinfo(str(pth), arcname=name)
+            if ti is None:
+                return                                  # a socket or the like
+            if ti.isreg():
+                with open(pth, "rb") as fh:
+                    ex = _Exact(fh, ti.size)
+                    tar.addfile(ti, ex)
+                if ex.short:
+                    errors.append(f"{pth}: changed while it was read")
+                names.append(name)
+            else:
+                tar.addfile(ti)
+        except OSError as e:
+            errors.append(f"{pth}: {e}")
+    src = Path(src)
+    one(src, arc)
+    if src.is_dir() and not src.is_symlink():
+        for cur, dirs, files in os.walk(src, onerror=lambda e: errors.append(f"{e.filename}: {e.strerror}")):
+            dirs.sort()
+            for name in dirs + sorted(files):
+                pth = Path(cur) / name
+                one(pth, arc + "/" + pth.relative_to(src).as_posix())
+            dirs[:] = [d for d in dirs if not (Path(cur) / d).is_symlink()]
+
+
+def cipher_pick(key, asked=None):
+    """'age' or 'openssl': what was asked, else what the key file is, else what is installed (age first)."""
+    t = read(key) if Path(key).is_file() else None
+    is_age = bool(t) and "AGE-SECRET-KEY-" in t
+    if asked:
+        c = asked
+    elif t is not None:
+        c = "age" if is_age else "openssl"
+    else:
+        c = "age" if shutil.which("age") and shutil.which("age-keygen") else "openssl"
+    if t is not None and (c == "age") != is_age:
+        raise Fail(f"{key} is {'an age key' if is_age else 'a passphrase'} file: it cannot be used with {c}")
+    need = ["age"] + ([] if t is not None else ["age-keygen"]) if c == "age" else ["openssl"]
+    miss = [n for n in need if not shutil.which(n)]
+    if miss:
+        raise Fail(f"the off-site copy needs {' and '.join(miss)} on PATH (install `age`, or `openssl`); nothing was "
+                   "written")
+    return c
+
+
+def cipher_cmd(cipher, key, out=None, src=None):
+    """The command that encrypts stdin into `out`, or (src given) decrypts `src` to stdout. The passphrase never
+    appears in the command line: only the path of its file."""
+    if cipher == "age":
+        return ["age", "-d", "-i", str(key), str(src)] if src else ["age", "-e", "-i", str(key), "-o", str(out)]
+    if src:
+        return ["openssl", *OPENSSL_ENC, "-d", "-pass", f"file:{key}", "-in", str(src)]
+    return ["openssl", *OPENSSL_ENC, "-salt", "-pass", f"file:{key}", "-out", str(out)]
+
+
+def decrypt_line(cipher, key, archive, dest):
+    if cipher == "age":
+        return f"age -d -i {shq(key)} {shq(archive)} | tar -xzpf - -C {shq(dest)}"
+    return (f"openssl {' '.join(OPENSSL_ENC)} -d -pass file:{shq(key)} -in {shq(archive)} | tar -xzpf - -C {shq(dest)}")
+
+
+def key_create(cipher, key):
+    """Make the passphrase file (mode 600, folder 700). age: an identity from age-keygen; openssl: 48 random bytes
+    as text. Its content is never printed."""
+    import secrets
+    key = Path(key)
+    if not key.parent.is_dir():                         # a folder we make is private; yours keeps its mode
+        key.parent.mkdir(parents=True)
+        os.chmod(key.parent, 0o700)
+    if cipher == "age":
+        r = subprocess.run(["age-keygen", "-o", str(key)], capture_output=True, text=True)
+        if r.returncode or not key.is_file():
+            raise Fail(f"age-keygen could not write {key}: {(r.stdout + r.stderr).strip()}")
+    else:
+        fd = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(secrets.token_urlsafe(48) + "\n")
+    os.chmod(key, 0o600)
+
+
+def offsite_build(items, left_out, dest, name, cipher, key):
+    """Stream a tar.gz of `items` straight into the cipher (no clear copy touches the disk), then decrypt it again
+    and compare the file list: an archive that cannot be opened with the key is never kept.
+    Returns (archive path, number of files, notes about unreadable files)."""
+    import tarfile
+    import tempfile
+    import time
+    import io
+    dest = Path(dest)
+    ext = "age" if cipher == "age" else "enc"
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    out, n = dest / f"offsite-{name}-{stamp}.tar.gz.{ext}", 2
+    while out.exists():
+        out, n = dest / f"offsite-{name}-{stamp}-{n}.tar.gz.{ext}", n + 1
+    tmp = out.with_name("." + out.name + ".part")
+    names, errors = [], []
+    manifest = "\n".join(
+        [f"The Mothership {VERSION} off-site copy, made {time.strftime('%Y-%m-%d %H:%M:%S %z')}", f"cipher: {cipher}", "",
+         "In this archive:"] + [f"  {arc}  <-  {src}" for arc, src in items] +
+        ["", "Left out:"] + [f"  {x}" for x in left_out or ["nothing"]] +
+        ["", "Restore: python3 install.py offsite --restore ARCHIVE --to EMPTY-FOLDER, then follow docs/RESTORE.md "
+             "(or wiki/sops/restore.md in the base)."]) + "\n"
+    try:
+        if tmp.exists():
+            tmp.unlink()
+        with tempfile.TemporaryFile() as errf:
+            old = os.umask(0o077)
+            try:
+                proc = subprocess.Popen(cipher_cmd(cipher, key, out=tmp), stdin=subprocess.PIPE,
+                                        stdout=subprocess.DEVNULL, stderr=errf)
+            finally:
+                os.umask(old)
+            try:
+                with tarfile.open(fileobj=proc.stdin, mode="w|gz") as tar:
+                    ti = tarfile.TarInfo("MANIFEST.txt")
+                    data = manifest.encode()
+                    ti.size, ti.mtime, ti.mode = len(data), int(time.time()), 0o600
+                    tar.addfile(ti, io.BytesIO(data))
+                    names.append("MANIFEST.txt")
+                    for arc, src in items:
+                        tar_add(tar, src, arc, names, errors)
+                proc.stdin.close()
+            except (BrokenPipeError, OSError) as ex:
+                proc.kill()
+                proc.wait()
+                errf.seek(0)
+                raise Fail(f"the off-site copy could not be encrypted with {cipher} ({ex}): "
+                           f"{errf.read().decode(errors='replace').strip()[:400]}")
+            if proc.wait() != 0:
+                errf.seek(0)
+                raise Fail(f"{cipher} failed: {errf.read().decode(errors='replace').strip()[:400]}")
+        os.chmod(tmp, 0o600)
+        got = offsite_list(cipher, key, tmp)
+        if sorted(got) != sorted(names):
+            raise Fail("the off-site copy did not read back complete with the passphrase file; nothing was kept")
+        os.replace(tmp, out)
+    except BaseException:
+        if tmp.exists():
+            tmp.unlink()
+        raise
+    h = hashlib.sha256()
+    with open(out, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    side = out.with_name(out.name + ".sha256")
+    side.write_text(f"{h.hexdigest()}  {out.name}\n", encoding="utf-8")
+    os.chmod(side, 0o600)
+    return out, len(names), errors
+
+
+def offsite_open(cipher, key, archive):
+    """(process, tar stream) of a decrypted archive; the caller reads the stream and then calls offsite_close."""
+    import tarfile
+    proc = subprocess.Popen(cipher_cmd(cipher, key, src=archive), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        return proc, tarfile.open(fileobj=proc.stdout, mode="r|gz")
+    except (tarfile.TarError, OSError, EOFError) as ex:
+        err = proc.stderr.read().decode(errors="replace").strip()
+        proc.kill()
+        proc.wait()
+        raise Fail(f"{archive} could not be opened with {key} ({cipher}): {err[:300] or ex}")
+
+
+def offsite_list(cipher, key, archive):
+    import tarfile
+    proc, tar = offsite_open(cipher, key, archive)
+    try:
+        return [m.name for m in tar if m.isreg()]
+    except (tarfile.TarError, OSError, EOFError) as ex:
+        raise Fail(f"{archive} did not read back ({ex})")
+    finally:
+        proc.stdout.close()
+        proc.stderr.close()
+        proc.wait()
+
+
+def offsite_extract(cipher, key, archive, dest):
+    """Decrypt and unpack into dest (must be empty or absent). Names that would leave dest are refused."""
+    import tarfile
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    os.chmod(dest, 0o700)
+    proc, tar = offsite_open(cipher, key, archive)
+    n = 0
+    kw = {"filter": "tar"} if hasattr(tarfile, "tar_filter") else {}
+    try:
+        for m in tar:
+            parts = Path(m.name).parts
+            if m.name.startswith("/") or ".." in parts:
+                raise Fail(f"{archive}: unsafe name in the archive ({m.name}); stopped")
+            tar.extract(m, dest, **kw)
+            n += 1 if m.isreg() else 0
+    except (tarfile.TarError, OSError, EOFError) as ex:
+        raise Fail(f"{archive} could not be unpacked ({ex})")
+    finally:
+        proc.stdout.close()
+        err = proc.stderr.read().decode(errors="replace").strip()
+        proc.stderr.close()
+        rc = proc.wait()
+    if rc:
+        raise Fail(f"{archive} could not be decrypted with {key} ({cipher}): {err[:300]}")
+    return n
+
+
+def syncthing_steps(d, key, cipher):
+    """The exact steps to get the folder onto another machine with Syncthing (never run here: its GUI holds an API
+    key and the device IDs), plus what to do with the passphrase file."""
+    there = "found on PATH here" if shutil.which("syncthing") else \
+        "NOT found on PATH here: install it first, or move the folder another way (rsync, a disk): the archive is encrypted either way"
+    return [
+        f"Share {d} with your other machine (Syncthing: {there}):",
+        "  A. Your own machine (the archive is already encrypted with your passphrase file):",
+        f"     1. This machine, Syncthing GUI (http://127.0.0.1:8384) > Add Folder: Folder Path {d}, Folder Label "
+        "offsite-copy.",
+        "     2. Advanced tab > Folder Type: Send Only. Sharing tab: tick the other machine. Save.",
+        "     3. The other machine: accept the folder, choose its path (for example ~/offsite-copy), Advanced > Folder "
+        "Type: Receive Only.",
+        "        File Versioning there: Simple File Versioning, keep 5 (a bad copy can then never replace every good one).",
+        "  B. A machine you do not fully trust (Syncthing encrypts once more):",
+        "     1. As A.1, Folder Type Send Only.",
+        "     2. Sharing tab > Untrusted (Encrypted): tick that device and type an encryption password for it. Save.",
+        "     3. That device: accept the folder with Folder Type: Receive Encrypted (it stores unreadable data only).",
+        "        Keep that password with the passphrase file: without it Syncthing cannot give the files back.",
+        f"  The passphrase file {key} ({'an age key' if cipher == 'age' else 'openssl AES-256, PBKDF2'}) opens every "
+        "archive. Put a copy where this machine's disk is not:",
+        "  your password manager, or the other machine OUTSIDE the shared folder. Never in the base, the vault or "
+        "the shared folder.",
+        "  Without it the copies cannot be read; with only it and one archive everything in the vault comes back."]
+
+
+def restore_page_text(base, d, key, cipher, payload):
+    """wiki/sops/restore.md: how to get this machine back from the off-site copy (written once, then yours)."""
+    today = os.environ.get("BRAIN_TODAY") or __import__("time").strftime("%Y-%m-%d")
+    v = vault_root(base)
+    return f"""---
+title: Restore from the off-site copy
+sources: [The Mothership install.py offsite]
+updated: {today}
+scope: private
+---
+
+# Restore from the off-site copy
+
+What exists outside this machine: one encrypted archive per day in `{d}` (shared with another machine), made by
+`install.py offsite`. It holds the vault (`{v}`), the base's registry files and the newest entry of each backup
+folder. It does not hold the base itself: the notes are synced and in git.
+
+You need: one archive (`offsite-*.tar.gz.{'age' if cipher == 'age' else 'enc'}`) and the passphrase file (here: `{key}`; your copy
+is in your password manager or on the other machine, outside the shared folder).
+
+## Steps on a new or repaired machine
+1. Copy the newest archive and the passphrase file to the machine. Check the archive: `sha256sum -c ARCHIVE.sha256`.
+   (A machine that holds the folder as "Receive Encrypted" stores unreadable data: sync the folder from it to a
+   machine you trust first, with the folder's encryption password.)
+2. Unpack into an empty folder:
+   `python3 {payload}/install.py offsite --restore ARCHIVE --passphrase-file KEYFILE --to ~/restore`
+   Without The Mothership: `mkdir -p ~/restore && cd ~ && {decrypt_line(cipher, 'KEYFILE', 'ARCHIVE', 'restore')}`
+   ({'needs `age`' if cipher == 'age' else 'needs OpenSSL 1.1.1+ or LibreSSL 3.1+'}).
+3. Read `~/restore/MANIFEST.txt`: what is in the archive and what was left out.
+4. The vault: `mv ~/restore/vault {v}` and `chmod 700 {v}` (only when no vault is there; never over a live one).
+5. The base: clone it from its git remote, or let the sync bring the notes back, into `{base}`.
+6. The products: get The Mothership and run `python3 install.py --base {base} --yes`.
+7. The links from the base into the vault: `python3 tools/brain.py doctor` in the base names what is missing;
+   `~/restore/base-state/engines.json` lists which tool folders have vault links.
+8. Backups, when you need an older state: `~/restore/backups/` (one newest entry per backup folder).
+9. Check: `python3 {payload}/install.py check`, then make a fresh copy: `install.py offsite`.
+
+## Keep it working
+- `install.py check` warns when the newest copy is older than {OFFSITE_MAX_AGE_DAYS} days.
+- The daily timer: `systemctl --user status {OFFSITE_TIMER}`.
+- Try a restore into a scratch folder a few times a year: an untested copy is a hope, not a backup.
+"""
+
+
+def wait_network(seconds):
+    """Wait until a default route exists (Linux /proc/net/route), at most `seconds`. True when it does."""
+    import time
+    end = time.time() + max(0, seconds)
+    while True:
+        t = read("/proc/net/route")
+        if t is None or any(l.split()[1:2] == ["00000000"] for l in t.splitlines()[1:]):
+            return True
+        if time.time() >= end:
+            return False
+        time.sleep(2)
+
+
+def notify(base, title, text):
+    """The base's notify command (.brain/notify.json {"command": [...]}; Skeleton Base's contract): it gets
+    {"title", "text"} as JSON on stdin. Returns None when none is set, else (ok, message)."""
+    cmd = (load_json(Path(base) / ".brain" / "notify.json", {}) or {}).get("command")
+    if not (isinstance(cmd, list) and cmd and all(isinstance(x, str) for x in cmd)):
+        return None
+    try:
+        r = subprocess.run(cmd, input=json.dumps({"title": title, "text": text}), capture_output=True, text=True,
+                           timeout=60)
+    except (OSError, subprocess.SubprocessError) as ex:
+        return False, str(ex)
+    return r.returncode == 0, f"exit {r.returncode}"
+
+
 # ------------------------------------------------------------------ runner
 class Mothership:
     def __init__(self, args):
@@ -771,6 +1251,9 @@ class Mothership:
             p.append("enable the units with systemctl --user (--yes) or print the command")
         elif not is_linux():
             p.append("no systemd on this system: the watcher is skipped (hooks still collect)")
+        if is_linux():
+            p.append(f"write its own user units: {OFFSITE_TIMER} (daily off-site copy; not enabled until `install.py "
+                     f"offsite --timer`) and {BOOT_UNIT} (check after boot; enabled with --yes)")
         p.append("run checks (brain.py check + lint, Frugal-Bridge check, block order)")
         p.append(f"record everything in {base / STATE}")
         return p
@@ -894,6 +1377,7 @@ class Mothership:
         self.track("reconnect")
 
         self.systemd(base, opts, flags)
+        self.own_units(base)
         self.track("systemd")
 
     def claude_access(self, base):
@@ -1042,6 +1526,293 @@ class Mothership:
             self.say(f"- systemd: restarted {' '.join(svcs)} (new code)" if rc3 == 0 else
                      f"- systemd: could not restart ({out3}); run by hand:\n    systemctl --user restart {' '.join(svcs)}")
 
+    def own_units(self, base):
+        """Our own user units (Linux only). The off-site copy service and its daily timer are written and never
+        enabled here (`install.py offsite --timer` does that, once a copy exists). The check after boot is enabled
+        when --yes was given and systemctl --user works; else the command is printed."""
+        if not is_linux():
+            return
+        sd = self.st["systemd"]
+        d = own_unit_dir(base)
+        for name, text in own_unit_texts(base, self.payload).items():
+            write_if_changed(d / name, text)
+        now = sorted(str(d / n) for n in OWN_UNITS)
+        for f in sd.get("own_units") or []:            # the base's unit folder changed (pinned since): no second copy
+            if f not in now and Path(f).name in OWN_UNITS and Path(f).is_file():
+                Path(f).unlink()
+        sd["own_units"] = now
+        en = sd.setdefault("own_enabled", [])
+        cmd = f"systemctl --user daemon-reload && systemctl --user enable {BOOT_UNIT}"
+        if not self.a.yes or not systemctl_ok():
+            if BOOT_UNIT not in en:
+                self.say(f"- check after boot: unit written, not enabled. To enable it:\n    {cmd}")
+            return
+        systemctl("daemon-reload")
+        rc, out = systemctl("enable", BOOT_UNIT)
+        if rc:
+            self.say(f"- check after boot: could not enable ({out}); run by hand:\n    {cmd}")
+            return
+        if BOOT_UNIT not in en:
+            en.append(BOOT_UNIT)
+        self.say(f"- check after boot: enabled {BOOT_UNIT} (doctor + failed user units, sent to the base's notify "
+                 "command when one is set)")
+
+    def own_units_undo(self, st, rollback=False):
+        sd = st.get("systemd") or {}
+        en = [u for u in sd.get("own_enabled") or [] if u in OWN_UNITS]
+        ok = systemctl_ok() if (en or sd.get("own_units")) else False
+        if en and ok:
+            systemctl("disable", "--now", *en)
+            self.say("- systemd: disabled " + " ".join(en))
+        elif en:
+            self.say("- systemd: not reachable; if they are still enabled: systemctl --user disable --now " + " ".join(en))
+        gone = False
+        for f in sd.get("own_units") or []:
+            f = Path(f)
+            if f.name in OWN_UNITS and f.is_file():
+                f.unlink()
+                gone = True
+        if gone and ok:
+            systemctl("daemon-reload")
+        cfg = mothership_home() / OFFSITE_CFG
+        c = offsite_cfg()
+        if cfg.is_file() and not rollback:             # a failed first install leaves an earlier set-up alone
+            cfg.unlink()
+            self.say(f"- off-site copy: your archives in {c.get('dir')} and the passphrase file {c.get('key')} are "
+                     "kept (they are yours; delete them yourself when you no longer want them)")
+
+    # ---- off-site copy
+    def offsite_places(self, base):
+        """(folder, passphrase file, cipher asked, max MB, keep): the flags, else the first run's choices, else the
+        defaults. Refuses a folder or a passphrase file in a place that would defeat the copy."""
+        c = offsite_cfg()
+        pick = lambda flag, key, default: Path(os.path.abspath(os.path.expanduser(flag or c.get(key) or default)))
+        d = pick(self.a.offsite_dir, "dir", OFFSITE_DIR)
+        key = pick(self.a.passphrase_file, "key", OFFSITE_KEY)
+        v = vault_root(base)
+        if d.resolve() == home().resolve():
+            raise Fail(f"the off-site folder cannot be the home folder itself ({d}); nothing was written")
+        for what, root in (("the base", base), ("the vault", v)):
+            if inside(d, root) or inside(root, d):
+                raise Fail(f"the off-site folder {d} is inside {what} ({root}) or holds it: it must be a folder of "
+                           f"its own, outside (default {OFFSITE_DIR}); nothing was written")
+        for what, root in (("the base", base), ("the vault", v), ("the off-site folder", d)):
+            if inside(key, root):
+                raise Fail(f"the passphrase file {key} is inside {what} ({root}): it would travel with what it "
+                           f"protects. Keep it outside (default {OFFSITE_KEY}) and a copy in your password manager; "
+                           "nothing was written")
+        mx = self.a.max_mb if self.a.max_mb is not None else int(c.get("max_mb") or OFFSITE_MAX_MB)
+        keep = self.a.keep if self.a.keep is not None else int(c.get("keep") or OFFSITE_KEEP)
+        if mx < 0 or keep < 1:
+            raise Fail("--max-mb must be 0 or more and --keep 1 or more")
+        return d, key, self.a.cipher or c.get("cipher"), mx, keep
+
+    def offsite(self):
+        import time
+        if self.a.restore:                             # also on a machine with nothing installed yet
+            try:
+                base = self.resolve_base(False)
+            except Fail:
+                base = Path(os.path.expanduser(DEFAULT_BASE))
+            return self.offsite_restore(base, Path(os.path.abspath(os.path.expanduser(
+                self.a.passphrase_file or offsite_cfg().get("key") or OFFSITE_KEY))))
+        base = self.resolve_base(False)
+        if not base.is_dir():
+            raise Fail(f"{base} does not exist")
+        st = load_json(base / STATE) or {}
+        d, key, asked, max_mb, keep = self.offsite_places(base)
+        if self.a.steps:
+            cipher = cipher_pick(key, asked) if key.is_file() else (asked or "openssl")
+            for line in syncthing_steps(d, key, cipher):
+                self.say(line)
+            self.say(f"Daily copy: python3 {self.payload / 'install.py'} offsite --timer   (enables {OFFSITE_TIMER})")
+            self.say(f"Restore: python3 {self.payload / 'install.py'} offsite --restore ARCHIVE --to EMPTY-FOLDER   "
+                     f"(steps: {base / RESTORE_PAGE}, docs/RESTORE.md)")
+            return 0
+        cipher = cipher_pick(key, asked)
+        first = not offsite_cfg().get("dir")
+        if not key.is_file():
+            key_create(cipher, key)
+            self.say(f"- passphrase file created: {key} (mode 600; {'an age key' if cipher == 'age' else '48 random bytes'}"
+                     "). COPY IT NOW to your password manager or to the other machine, outside the shared folder: "
+                     "without it no copy can be read.")
+        elif key.stat().st_mode & 0o077:
+            os.chmod(key, 0o600)
+            self.say(f"- passphrase file {key}: mode set to 600 (it was readable by others)")
+        if not (read(key) or "").strip():
+            raise Fail(f"the passphrase file {key} is empty; nothing was written")
+        d.mkdir(parents=True, exist_ok=True)
+        os.chmod(d, 0o700)
+        if not (d / ".stignore").exists():
+            (d / ".stignore").write_text("// written by The Mothership: half-written archives are not shared\n.*.part\n",
+                                         encoding="utf-8")
+        items, left_out = offsite_plan(base, st, max_mb * 1000 * 1000, skip=(d,))
+        if not any(arc == "vault" or arc.startswith("backups/") for arc, _ in items):
+            raise Fail(f"nothing to copy: no vault at {vault_root(base)} and no backup folder with an entry")
+        out, n, errors = offsite_build(items, left_out, d, base.name, cipher, key)
+        arcs = offsite_archives(d)
+        for old in arcs[:-keep]:
+            old.unlink()
+            side = old.with_name(old.name + ".sha256")
+            if side.exists():
+                side.unlink()
+        cfg = {"dir": str(d), "key": str(key), "cipher": cipher, "max_mb": max_mb, "keep": keep, "base": str(base),
+               "last": {"archive": out.name, "time": int(time.time()), "files": n, "bytes": out.stat().st_size,
+                        "left_out": left_out, "unreadable": errors[:50]}}
+        write_if_changed(mothership_home() / OFFSITE_CFG, dump(cfg))
+        self.say(f"off-site copy: {out} ({n} files, {out.stat().st_size / 1e6:.1f} MB, {cipher}, mode 600; read back "
+                 f"with the passphrase file: complete). Kept in the folder: {min(len(arcs), keep)} of at most {keep}.")
+        for arc, src in items:
+            self.say(f"  + {arc}  <-  {src}")
+        for x in left_out:
+            self.say(f"  - left out: {x}")
+        for x in errors[:20]:
+            self.say(f"  ! not read: {x}")
+        self.restore_page(base, d, key, cipher)
+        if first:
+            for line in syncthing_steps(d, key, cipher):
+                self.say(line)
+            self.say(f"Restore: python3 {self.payload / 'install.py'} offsite --restore {out.name} --to EMPTY-FOLDER   "
+                     f"(steps: {base / RESTORE_PAGE})")
+            if not self.a.timer:
+                self.say(f"Daily copy: python3 {self.payload / 'install.py'} offsite --timer   (enables {OFFSITE_TIMER})")
+        rc = 1 if errors else 0
+        if self.a.timer:
+            rc = self.offsite_timer(base, st) or rc
+        return rc
+
+    def offsite_timer(self, base, st):
+        """Enable the daily timer (only after a copy was made: the caller just made one)."""
+        if not is_linux():
+            self.say("- daily copy: no systemd on this system; run `install.py offsite` from your own scheduler")
+            return 0
+        d = own_unit_dir(base)
+        texts = own_unit_texts(base, self.payload if (self.payload / "install.py").is_file() else ROOT)
+        for name in (OFFSITE_SERVICE, OFFSITE_TIMER):
+            write_if_changed(d / name, texts[name])
+        cmd = f"systemctl --user daemon-reload && systemctl --user enable --now {OFFSITE_TIMER}"
+        if st:
+            sd = st.setdefault("systemd", {"units": [], "enabled_by_us": []})
+            sd["own_units"] = sorted({f for f in sd.get("own_units") or [] if Path(f).name not in (OFFSITE_SERVICE, OFFSITE_TIMER)}
+                                     | {str(d / n) for n in (OFFSITE_SERVICE, OFFSITE_TIMER)})
+        if not systemctl_ok():
+            if st:
+                write_if_changed(base / STATE, dump(st))
+            self.say(f"- daily copy: systemctl --user is not available here. When it is, run:\n    {cmd}")
+            return 0
+        systemctl("daemon-reload")
+        rc, out = systemctl("enable", "--now", OFFSITE_TIMER)
+        if rc:
+            self.say(f"- daily copy: could not enable ({out}); run by hand:\n    {cmd}")
+            return 1
+        if st:
+            en = st["systemd"].setdefault("own_enabled", [])
+            if OFFSITE_TIMER not in en:
+                en.append(OFFSITE_TIMER)
+            write_if_changed(base / STATE, dump(st))
+        self.say(f"- daily copy: enabled {OFFSITE_TIMER}")
+        return 0
+
+    def restore_page(self, base, d, key, cipher):
+        """The restore steps as a page of the base, written once (then it is yours); the index gets its line."""
+        f = base / RESTORE_PAGE
+        if f.exists() or not (base / "wiki").is_dir():
+            return
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(restore_page_text(base, d, key, cipher, self.payload), encoding="utf-8")
+        brain = base / "tools" / "brain.py"
+        if brain.is_file():
+            self.py(brain, "index", cwd=base, check=False)
+        self.say(f"- restore steps written to {f} (yours from now on: never overwritten)")
+
+    def offsite_restore(self, base, key):
+        arc = Path(os.path.abspath(os.path.expanduser(self.a.restore)))
+        if not arc.is_file():
+            raise Fail(f"{arc}: no such archive")
+        if not self.a.to:
+            raise Fail("--restore needs --to DIR (an empty or new folder; never the live vault)")
+        dest = Path(os.path.abspath(os.path.expanduser(self.a.to)))
+        if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
+            raise Fail(f"{dest} exists and is not empty: --to must be an empty or new folder (nothing was written)")
+        for what, root in (("the base", base), ("the vault", vault_root(base))):
+            if root.exists() and inside(dest, root):
+                raise Fail(f"{dest} is inside {what} ({root}): unpack somewhere else and move what you need")
+        if not key.is_file():
+            raise Fail(f"the passphrase file {key} does not exist: pass --passphrase-file FILE (your copy of it)")
+        cipher = "age" if arc.name.endswith(".age") else "openssl"
+        cipher_pick(key, cipher)
+        side = arc.with_name(arc.name + ".sha256")
+        if side.is_file():
+            h = hashlib.sha256()
+            with open(arc, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            want = ((read(side) or "").split() or [""])[0]
+            if want and h.hexdigest() != want:
+                raise Fail(f"{arc} does not match {side.name}: the file is damaged; take another archive")
+        made = not dest.exists()
+        try:
+            n = offsite_extract(cipher, key, arc, dest)
+        except Fail:
+            if made and dest.is_dir():
+                shutil.rmtree(dest)
+            raise
+        self.say(f"restored {n} files from {arc.name} into {dest} (mode 700)")
+        self.say(f"  {dest / 'MANIFEST.txt'}: what the archive holds")
+        if (dest / "vault").is_dir():
+            v = vault_root(base)
+            self.say(f"  the vault: {dest / 'vault'}  ->  put it back with: mv {shq(dest / 'vault')} {shq(v)} && chmod 700 "
+                     f"{shq(v)}   (only when no vault is there)")
+        self.say(f"  next steps: {base / RESTORE_PAGE} or docs/RESTORE.md")
+        return 0
+
+    # ---- check after boot
+    def boot_check(self):
+        import socket
+        import time
+        base = self.resolve_base(False)
+        net = wait_network(self.a.wait)
+        if self.a.settle > 0:
+            time.sleep(self.a.settle)                  # give the other units time to start, or to fail
+        lines, probs = [], 0
+        if not net:
+            lines.append(f"network: no default route after {self.a.wait} s")
+            probs += 1
+        brain = base / "tools" / "brain.py"
+        if brain.is_file():
+            rc, out = self.py(brain, "doctor", "--base", base, cwd=base, check=False)
+            rows = [l.strip() for l in out.splitlines() if l.startswith(("ERROR", "WARN"))]
+            summ = [l for l in out.splitlines() if l.startswith("doctor:")]
+            lines.append(summ[-1] if summ else f"doctor: exit {rc}")
+            lines += rows[:8] + ([f"... and {len(rows) - 8} more (python3 tools/brain.py doctor)"] if len(rows) > 8 else [])
+            probs += len(rows) or (1 if rc else 0)
+        else:
+            lines.append(f"doctor: {brain} is missing")
+            probs += 1
+        if systemctl_ok():
+            rc, out = systemctl("--failed", "--no-legend", "--plain")
+            failed = [l.split()[0] for l in out.splitlines() if l.split() and "." in l.split()[0]]
+            lines.append("failed user units: " + (", ".join(failed) if failed else "none"))
+            probs += len(failed)
+        else:
+            lines.append("failed user units: systemctl --user is not reachable")
+        ow = offsite_warning()
+        if ow:
+            lines.append("off-site copy: " + ow)
+            probs += 1
+        title = f"After boot ({socket.gethostname()}): " + ("OK" if not probs else f"{probs} problem(s)")
+        self.say(title)
+        for l in lines:
+            self.say("  " + l)
+        if self.a.no_notify:
+            return 0
+        r = notify(base, title, "\n".join(lines))
+        if r is None:
+            self.say(f"notify: none set ({base / '.brain' / 'notify.json'} with {{\"command\": [...]}} sends this result)")
+            return 0
+        self.say(f"notify: {'sent' if r[0] else 'FAILED'} ({r[1]})")
+        return 0 if r[0] else 1
+
     def finish(self):
         st = dict(self.st)
         for k in ("done", "dirs_before", "backups_before"):
@@ -1187,6 +1958,7 @@ class Mothership:
                 self.say("- systemd: not reachable; if the units still run: systemctl --user disable --now "
                          + " ".join(sd["enabled_by_us"]))
 
+        step("its own units and off-site settings", lambda: self.own_units_undo(st, rollback))
         step("Claude Code access", lambda: self.claude_access_undo(st))
         brain = base / "tools" / "brain.py"
         brain = brain if brain.is_file() else sbk / "tools" / "brain.py"
@@ -1414,6 +2186,10 @@ class Mothership:
                 rc, out = systemctl("is-active", u)
                 if out.strip() != "active":
                     probs.append(f"{u} is not running ({out.strip() or rc}): systemctl --user enable --now {u}")
+        own_sd = (getattr(self, "st", None) or st).get("systemd") or {}     # this run's record, when it is an install
+        for f in own_sd.get("own_units") or []:
+            if not Path(f).is_file():
+                probs.append(f"{f} is missing (its own unit): run install again")
         if not quiet:
             for p in probs:
                 self.say("FAIL " + p)
@@ -1447,6 +2223,10 @@ class Mothership:
         probs = self.checks(base)
         self.show_warnings()
         w = len(getattr(self, "warnings", None) or [])
+        ow = offsite_warning()
+        if ow:                                         # a warning, never an install problem: check still exits 0
+            self.say("WARN off-site copy: " + ow)
+            w += 1
         self.say(f"check: {'OK' if not probs else str(len(probs)) + ' problem(s)'}"
                  + (f", {w} warning(s)" if w else "") + f" ({base})")
         return 1 if probs else 0
@@ -1476,6 +2256,14 @@ class Mothership:
         for line in self.tool_lines(base):
             self.say(line)
         self.say(f"user file: {base / 'wiki' / 'me'}/ (one for every tool)")
+        c = offsite_cfg()
+        if c.get("dir"):
+            arcs = offsite_archives(c["dir"])
+            self.say(f"off-site copy: {c['dir']} ({len(arcs)} archive(s), {c.get('cipher')}"
+                     + (f", newest {arcs[-1].name}" if arcs else "") + f"); passphrase file {c.get('key')}; daily timer "
+                     + ("enabled" if OFFSITE_TIMER in (sd.get("own_enabled") or []) else "not enabled"))
+        else:
+            self.say("off-site copy: not set up (python3 install.py offsite)")
         return 0
 
 
@@ -1483,14 +2271,15 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="install.py", description="The Mothership: Skeleton Base + Frugal-Bridge, "
                                 "one install.")
     p.add_argument("command", nargs="?", default="install",
-                   choices=("install", "check", "status", "update", "uninstall", "report"))
+                   choices=("install", "check", "status", "update", "uninstall", "report", "offsite", "boot-check"))
     p.add_argument("days", nargs="?", type=int, help="report: how many days back (default: Frugal-Bridge's)")
     p.add_argument("--base", help=f"the knowledge base folder (default {DEFAULT_BASE}, or the one already connected)")
     p.add_argument("--yes", "-y", action="store_true", help="no questions; run systemctl --user when available")
     p.add_argument("--no-frugal", action="store_true", help="only Skeleton Base")
     p.add_argument("--watch", dest="watch", action="store_true", default=None, help="watcher service (default on Linux)")
     p.add_argument("--no-watch", dest="watch", action="store_false")
-    p.add_argument("--timer", action="store_true", help="daily collect timer (also comes with --watch)")
+    p.add_argument("--timer", action="store_true", help="daily collect timer (also comes with --watch); offsite: "
+                   "enable its daily timer after this copy")
     p.add_argument("--tool-dir", action="append", metavar="TOOL=DIR",
                    help="one more config dir of a tool (e.g. claude-code=~/worker-claude), wired like its default "
                         "one by both products; repeatable, kept for re-runs")
@@ -1509,6 +2298,21 @@ def main(argv=None):
                    help="uninstall: also delete the base (asks for its folder name; backs it up first)")
     p.add_argument("--confirm-purge", metavar="NAME", help="non-interactive confirmation for --purge: the base's "
                    "folder name or full path (same as --yes-purge-NAME)")
+    p.add_argument("--offsite-dir", metavar="DIR", help=f"offsite: the folder of its own for the archives (default "
+                   f"{OFFSITE_DIR}; outside the base and the vault; kept for later runs)")
+    p.add_argument("--passphrase-file", metavar="FILE", help=f"offsite: the file that opens the archives (default "
+                   f"{OFFSITE_KEY}; made on the first run; never in the base, the vault or the off-site folder)")
+    p.add_argument("--cipher", choices=("age", "openssl"), help="offsite: default age when installed, else openssl "
+                   "AES-256 (PBKDF2)")
+    p.add_argument("--max-mb", type=int, metavar="N", help=f"offsite: cap for the backup entries in one archive "
+                   f"(default {OFFSITE_MAX_MB}; the vault always goes in whole)")
+    p.add_argument("--keep", type=int, metavar="N", help=f"offsite: archives kept in the folder (default {OFFSITE_KEEP})")
+    p.add_argument("--steps", action="store_true", help="offsite: only print the sharing and restore steps")
+    p.add_argument("--restore", metavar="ARCHIVE", help="offsite: decrypt and unpack this archive into --to DIR")
+    p.add_argument("--to", metavar="DIR", help="offsite --restore: an empty or new folder")
+    p.add_argument("--wait", type=int, default=0, metavar="SECONDS", help="boot-check: wait this long for the network")
+    p.add_argument("--settle", type=int, default=0, metavar="SECONDS", help="boot-check: then wait before looking")
+    p.add_argument("--no-notify", action="store_true", help="boot-check: print the result only")
     p.add_argument("--verbose", "-v", action="store_true", help="show the products' own output")
     p.add_argument("--version", action="version", version=f"The Mothership {VERSION}")
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -1526,6 +2330,10 @@ def main(argv=None):
             return m.check()
         if a.command == "report":
             return m.report()
+        if a.command == "offsite":
+            return m.offsite()
+        if a.command == "boot-check":
+            return m.boot_check()
         return m.status()
     except Fail as ex:
         print(f"ERROR: {ex}", file=sys.stderr)

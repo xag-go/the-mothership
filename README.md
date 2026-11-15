@@ -118,6 +118,48 @@ python3 the-mothership/install.py update
 It applies the new Skeleton Base and Frugal-Bridge versions to your install with your earlier choices. Your pages,
 sources, cards and edited files are left alone; product files you never changed are upgraded.
 
+## Off-site copy
+
+Everything above lives on one disk. `offsite` makes the copy that another machine can hold:
+
+```sh
+python3 ~/.local/share/the-mothership/payload/install.py offsite          # one encrypted archive now
+python3 ~/.local/share/the-mothership/payload/install.py offsite --timer  # and every day from now on
+python3 ~/.local/share/the-mothership/payload/install.py offsite --steps  # print the sharing and restore steps again
+```
+
+- **What goes in:** the vault (Skeleton Base's folder of secret files, whole), the base's registry files
+  (`.mothership.json`, `.kits.json`, `engines.json`, `projects.json`) and the newest entry of each backup folder of
+  the base and the products, while the cap allows (`--max-mb`, default 500). What did not fit is listed in the
+  output and in `MANIFEST.txt` inside the archive. The base itself never goes in: its notes are synced and in git.
+- **Where:** a folder of its own, default `~/offsite-copy` (`--offsite-dir`), mode 700, outside the base and the
+  vault. The newest 3 archives are kept (`--keep`).
+- **Encryption:** `age` when it is installed, else `openssl` AES-256-CBC with PBKDF2 (600,000 rounds). The key is a
+  **passphrase file**, made on the first run: default `~/.config/the-mothership/offsite.key`, mode 600
+  (`--passphrase-file`). It is refused inside the base, the vault or the off-site folder, and its content is never
+  printed. **Copy that file to your password manager or to the other machine, outside the shared folder:** without
+  it no copy can be read. The archive is streamed into the cipher (no clear copy touches the disk) and read back
+  with the passphrase file before it is kept. `openssl enc` has no built-in integrity check; the `.sha256` file
+  beside each archive detects damage.
+- **To the other machine:** the first run prints the exact Syncthing steps: the folder as Send Only here and
+  Receive Only there, or, for a device you do not fully trust, shared under "Untrusted (Encrypted)" and held there
+  as Receive Encrypted. Syncthing is never configured for you (its settings hold an API key and device IDs).
+- **Daily:** install writes `the-mothership-offsite.timer` and does not enable it; `offsite --timer` does, after a
+  copy was made. `check` prints a `WARN` line when the newest copy is older than 2 days.
+- **Restore:** `offsite --restore ARCHIVE --to EMPTY-FOLDER` (never over the live vault), then the steps in
+  [docs/RESTORE.md](docs/RESTORE.md). The first run also writes them, with your paths, to `wiki/sops/restore.md` in
+  the base (once; the page is yours after that).
+
+## Check after boot
+
+`the-mothership-boot-check.service` (a oneshot user unit, enabled by `install --yes`) runs once after each boot:
+it waits for the network (a default route, up to 3 minutes) and 90 seconds more, then runs
+`install.py boot-check`: Skeleton Base's `doctor`, `systemctl --user --failed` and the off-site warning. The result
+("After boot (host): OK" or the problems) goes to the base's notify command when `.brain/notify.json` has one
+(`{"command": ["your-program", "..."]}`: it gets `{"title", "text"}` as JSON on stdin), and to the journal. A user
+unit starts at boot only when lingering is on (`loginctl enable-linger`). Run it by hand any time:
+`install.py boot-check --no-notify`.
+
 ## Uninstall
 
 ```sh
@@ -126,6 +168,7 @@ python3 ~/.local/share/the-mothership/payload/install.py uninstall
 
 It undoes everything in reverse order, using each product's own uninstall, and gives your files back byte for
 byte: rules files, settings (including their original layout), systemd units and folders it created.
+Off-site archives and the passphrase file are yours and stay where they are.
 Pages you wrote stay in the base folder. Anything that was there before The Mothership (an adopted base or
 Frugal-Bridge) stays installed.
 
