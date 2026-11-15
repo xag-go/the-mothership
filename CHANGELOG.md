@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.17 (2026-11-15)
+
+- Skeleton Base 1.7.6 `dbb3b2e`: `engine pin-units` removes every link into the base's unit folder, whoever made it,
+  and `--workdir` gives units without one `WorkingDirectory=<base>`; doctor skips masked units.
+
 ## v1.2.16 (2026-11-14)
 
 - Skeleton Base 1.7.5 `fc5b619`: everything starts in the base. Pinned units have no links left (connect writes its own
