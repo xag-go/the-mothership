@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.19 (2026-11-15)
+
+- Skeleton Base 1.7.8 `4275d0e`: a pinned tool's old path keeps its guard (adopt, link moves and watch refuse it);
+  Claude Code keeps its `~/.claude` link on purpose (the desktop app's SSH remote installs its server there and
+  ignores CLAUDE_CONFIG_DIR), so doctor shows it as OK and `engine pin claude-code` refuses without --force; Remote
+  Control runtime files are not vault candidates.
+
 ## v1.2.18 (2026-11-15)
 
 - Vendors Skeleton Base 1.7.7 `7632773` (the 2026-11-15 general review: products and server pages, doctor checks on

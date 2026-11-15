@@ -192,7 +192,7 @@ import time
 import urllib.parse
 
 VERSION = "1"
-RELEASE = "1.7.7"        # product release (CHANGELOG); recorded in .kits.json so installers never downgrade
+RELEASE = "1.7.8"        # product release (CHANGELOG); recorded in .kits.json so installers never downgrade
 SRC = pathlib.Path(__file__).resolve().parent.parent          # the skeleton this script came with
 START = f"<!-- base-folder:start v{VERSION} -->"
 END = "<!-- base-folder:end -->"
@@ -4753,6 +4753,10 @@ def same_path(x, v):
 #   skills   it reads ~/.agents/skills (the base's skills are installed there once).
 #   status   "legacy" / "discontinued" (detected, never newly connected) / "app".
 #   access, mcp, memory, hooks: what connect does or why it cannot (shown by `connect --print` and the README).
+# 1.7.8: a tool whose default place must stay a link, and why. `engine pin` refuses it unless --force; doctor reports
+# the link as kept (OK), not as a link where a setting exists.
+KEEP_CLAUDE_LINK = ("the Claude desktop app's SSH remote uploads its server binary to ~/.claude and ignores "
+                    "CLAUDE_CONFIG_DIR, so ~/.claude must stay a link into the base")
 TOOLS = {t["key"]: t for t in (
     dict(key=".claude", name="Claude Code", bins=("claude",), marks=(".claude.json",),
          rules=((".claude/CLAUDE.md", "create"),),
@@ -4760,6 +4764,7 @@ TOOLS = {t["key"]: t for t in (
                 "`~/.claude/settings.json`",
          mcp="`mcpServers` in `~/.claude.json` (user scope)", memory="`~/.claude/projects/*/memory/*.md`",
          hooks="its own: SessionEnd, PreCompact (+ PostToolUse with --kick)",
+         keep_link=KEEP_CLAUDE_LINK,
          skills_note="skills: reads only `~/.claude/skills`, not `~/.agents/skills` (not copied there: other "
                      "tools read `~/.claude/skills` too and would load them twice); the base's AGENTS.md points to "
                      "its `skills/`",
@@ -6740,8 +6745,8 @@ def unknown_ai_dirs(base, home):
                 cands.append((key, pathlib.Path(e.path)))
     known = {r["dir"] for r in ADOPT_ROWS.values()} | set(TOOLS) | set(TOOL_HOMES)
     for key, d in cands:
-        if key in known or d.is_symlink() or in_dir(d, base) or in_dir(base, d):
-            continue
+        if key in known or d.is_symlink() or in_dir(d, base) or in_dir(base, d) or is_guard(d):
+            continue                                  # a pinned guard (1.7.8) is never a new AI folder
         if any(ai_signals(d)):
             out.append((key, d))
     return out
@@ -8931,7 +8936,15 @@ VAULT_SKIP_DIRS = tuple(x for x in ENGINE_DENY_DIRS if x not in VAULT_SECRET_DIR
     # sessions, caches, installed or vendored code (a code checkout, with .git, is skipped too)
 VAULT_SAFE_TOP = tuple(g.rstrip("/") for g in ENGINE_SAFE["*"] if g.endswith("/"))   # skills/, agents/, ...: no
                                                                                      # secrets live there
+VAULT_RUNTIME = ("remote/run",)             # 1.7.8: a tool's runtime folder, rewritten by its program on each run (Claude
+                                            # Code's Remote Control daemon.token): never a vault candidate. Git and
+                                            # Syncthing leave it out already (engine_rule denies it)
 VAULT_SCAN = ("engines", "data")            # doctor: a real secret file here is an ERROR (it belongs in the vault)
+
+
+def vault_runtime(rel):
+    """REL (a path below a tool folder, '/'-separated) is inside one of the tool's runtime folders."""
+    return any(rel == g or rel.startswith(g + "/") for g in VAULT_RUNTIME)
 
 
 def vault_secret_name(name, top=False, in_secret_dir=False):
@@ -8986,8 +8999,11 @@ def vault_secrets(d):
         dns[:] = sorted(x for x in dns if x not in VAULT_SKIP_DIRS and not os.path.islink(os.path.join(dp, x))
                         and not os.path.lexists(os.path.join(dp, x, ".git"))      # code checkouts are not logins
                         and not (dp == str(d) and (x in VAULT_SAFE_TOP or x in heavy))
-                        and not (chrom and x in CHROMIUM_HEAVY))                  # a profile's caches, any depth
+                        and not (chrom and x in CHROMIUM_HEAVY)                   # a profile's caches, any depth
+                        and not vault_runtime(os.path.relpath(os.path.join(dp, x), d)))   # 1.7.8: runtime files
         rel_parts = pathlib.Path(dp).relative_to(d).parts
+        if vault_runtime("/".join(rel_parts)):
+            continue
         sec = any(x in VAULT_SECRET_DIRS for x in rel_parts) or bool(rel_parts) and vault_own(rel_parts[0], own, True) \
             or chrom and any(x in CHROMIUM_DIRS for x in rel_parts)
         for f in fns:
@@ -9947,6 +9963,8 @@ def engine_adopt(base, tool, force=False, undo=False, path=None, vault=(), heavy
     name = ENGINE_NAMES.get(key, key.strip(".").replace("/", "-"))
     dest = base / "engines" / name
     src, set_by = tool_root(key, home)
+    if not set_by:
+        refuse_pinned(base, home, src, "engine adopt")   # 1.7.8: a pinned default place keeps its guard
     reg = reg_load(base, ENGINES_REG)
     if set_by and in_dir(src, dest):
         if name not in reg.get("engines", {}) and dest.is_dir():     # born in the base (a pre-set variable)
@@ -10273,6 +10291,25 @@ def launchers_refresh(base):
     return log
 
 
+def pinned_paths(base, home):
+    """Every old path pinned in engines.json (normalized, absolute)."""
+    out = set()
+    for e in reg_load(base, ENGINES_REG).get("engines", {}).values():
+        if isinstance(e, dict):
+            out |= {os.path.normpath(str(expand(r, home))) for r in (e.get("pinned") or {})}
+    return out
+
+
+def refuse_pinned(base, home, p, what):
+    """1.7.8: a pinned old path keeps its guard. Adopt, link and relink paths refuse it (a link there would let the
+    tool that uses the old path write into the base); nothing changes. Undo the pin to adopt it."""
+    p = pathlib.Path(p)
+    if os.path.normpath(str(p)) in pinned_paths(base, home) or is_guard(p):
+        raise SystemExit(f"{what}: {home_rel(p, home)} is pinned (its guard stays so the old path fails loudly, "
+                         "it is not a link into the base): nothing changed. `brain.py engine pin --undo NAME` "
+                         "first, if you mean to move it")
+
+
 def pinned_rows(base, home):
     """1.7.0 doctor: every pinned old path holds the guard file; a missing guard, a link or a real folder is an
     ERROR with the fix."""
@@ -10478,7 +10515,7 @@ def units_workdir(base):
     return log or ["engine pin-units --workdir: every service in ops/systemd has a WorkingDirectory= already"]
 
 
-def engine_pin(base, tool, undo=False):
+def engine_pin(base, tool, undo=False, force=False):
     """A tool adopted by its own setting whose default places are still links into the base (made by hand or by
     an older setup): the variable goes where every launcher sees it (the marked blocks in environment.d for user
     units and GUI sessions, ~/.profile, ~/.bashrc), then each link becomes the guard file (0 bytes, mode 000) that
@@ -10488,6 +10525,10 @@ def engine_pin(base, tool, undo=False):
     name = ENGINE_NAMES.get(key, tool) if key else tool
     if link_row(tool):
         name = link_row(tool)["id"]
+    keep = (TOOLS.get(key) or {}).get("keep_link") if key else None
+    if keep and not undo and not force:
+        raise SystemExit(f"engine pin {tool}: refused, the link is kept on purpose: {keep}. Pass --force to pin anyway "
+                         "(the desktop app's SSH remote then fails)")
     reg = reg_load(base, ENGINES_REG)
     e = reg.get("engines", {}).get(name)
     if isinstance(e, dict) and e.get("mode") == "adopted" and e.get("link") and not e.get("env"):
@@ -10654,6 +10695,7 @@ def link_move(base, src, name, home, locks=(), force=False, proof=(), what="engi
     base, home = pathlib.Path(base).resolve(), pathlib.Path(home)
     src, log = pathlib.Path(src), []
     dest = pathlib.Path(dest) if dest else pathlib.Path(base) / "engines" / name
+    refuse_pinned(base, home, src, what)              # 1.7.8: a pinned old path never becomes a link
     if src.is_symlink():
         if in_dir(src, base):
             raise SystemExit(f"{what}: {home_rel(src, home)} is already a link into the base "
@@ -10828,6 +10870,7 @@ def engine_adopt_link(base, key=None, force=False, row=None):
     t = row or TOOLS[key]
     name, d = t["id"], t.get("dir") or t["key"]
     src = pathlib.Path(os.path.abspath(os.path.expanduser(d))) if d.startswith(("/", "~")) else home / d
+    refuse_pinned(base, home, src, "engine adopt")       # 1.7.8
     extra = {k: list(t[k]) for k in ("vault", "heavy") if row and row.get("generic") and t.get(k)}
     if row and row.get("generic"):
         if name in reg_load(base, ENGINES_REG).get("engines", {}) or os.path.lexists(base / "engines" / name):
@@ -11446,6 +11489,9 @@ def adopt_guard(base, key, d, home):
             continue
         tool, env, eng = TOOLS.get(key, {}).get("name", key), e.get("env") or "its variable", base / "engines" / n
         load = "load ~/.config/environment.d/60-base-engines.conf or start a login shell"
+        if d.is_symlink() and in_dir(d, eng) and TOOLS.get(key, {}).get("keep_link"):
+            return ("OK", f"{tool}: ~/{key} is a link into engines/{n}, kept on purpose: "
+                          f"{TOOLS[key]['keep_link']}"), str(eng)
         if d.is_symlink() and in_dir(d, eng):
             return ("WARN", f"{tool}: ~/{key} is a link into engines/{n}, a link where a setting exists ({env}) "
                             f"-> brain.py engine pin {e.get('tool') or n} (the variable for every launcher, a "
@@ -11807,7 +11853,10 @@ def doctor(base, strict=False):
         tid = next((i for i, k in TOOL_IDS.items() if k == key), key)
         for lk in ([default] + [pathlib.Path(home) / f for f, k in TOOL_FILES.items() if k == key]) \
                 if var and not extra else []:
-            if lk.is_symlink() and in_dir(lk, base):
+            if lk.is_symlink() and in_dir(lk, base) and lk == default and TOOLS.get(key, {}).get("keep_link"):
+                rows.append(("OK", f"{name}: {home_rel(lk, home)} is a link into the base, kept on purpose: "
+                                   f"{TOOLS[key]['keep_link']}"))
+            elif lk.is_symlink() and in_dir(lk, base):
                 rows.append(("WARN", f"{name}: {home_rel(lk, home)} is a link into the base, a link where a setting "
                                      f"exists ({var}) -> brain.py engine pin {tid}"))
         if var and not extra and default.is_dir() and not default.is_symlink() and not in_dir(default, d):
@@ -12927,7 +12976,7 @@ def main(argv):
             elif sub == "pin":
                 if len(rest) != 2:
                     print("usage: engine pin TOOL [--undo]"); return 1
-                log = engine_pin(base, rest[1], undo)
+                log = engine_pin(base, rest[1], undo, force)
             elif sub == "pin-units":
                 log = units_workdir(base) if "--workdir" in flags else units_pin(base, undo)
             elif sub == "adopt-units":
