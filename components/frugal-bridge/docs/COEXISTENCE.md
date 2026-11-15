@@ -105,3 +105,12 @@ its block (`Path: <dir>`, quoted paths with spaces accepted), from the base's po
 (`~/.config/skeleton-base/base`) or its systemd user units (`--base <dir>`), or from `--base DIR` / `FRUGAL_BASE` —
 so it works even when no tool rules file carries the base block — and uses the base's slots: no second user file. If Frugal was installed first, re-running
 its setup switches it to the base and asks the user to move the old `~/.frugal-bridge/USER.md` content into the base.
+
+### One copy of the rules when both installs meet in the base
+A base can have Frugal's folder install (rules block in its `AGENTS.md`, hooks in its `.claude/settings.json`) and be
+the base of Frugal's user-level install. A session started in the base would then load the rules twice. Rule: while
+the user-level install serves the base (`global.json` names it), the base's Frugal block is a short pointer, the
+whole text is in `<base>/.frugal-bridge/RULES.md` (named by the pointer for a tool without a user-level copy), and
+the base's settings carry no Frugal hook entry. The block markers do not change, so the order rule (base block
+first) and both kits' checks stay as they are. Either install order gives the same files; removing the user-level
+install puts the whole text and the hook entries back. Other project folders are never changed this way.

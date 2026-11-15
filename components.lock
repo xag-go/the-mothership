@@ -1,26 +1,26 @@
 {
   "components": {
     "frugal-bridge": {
-      "commit": "aec9c5987d59505f3a1bd856eac0d7c4e1803354",
+      "commit": "0d76b87547fcbf249c5e80c0b9d4e3973c9d9993",
       "excluded": [],
-      "files": 48,
+      "files": 49,
       "manifest": "components/frugal-bridge.manifest",
-      "manifest_sha256": "c44f2276450677709ce65990b4cfa8521225643d909df7bea0618e1b76da828d",
+      "manifest_sha256": "b49c66c591d45d40b20bc952c1f900eb64744d19626930e758c8f58b972d6d31",
       "path": "components/frugal-bridge",
       "repo": "https://github.com/<owner>/frugal-bridge",
       "vendored_from": "local",
       "version": "6"
     },
     "skeleton-base": {
-      "commit": "dbb3b2eefc4e74fa96c1ba21f36265b2f8163c8c",
+      "commit": "763277363018674617db763728f0b40d194b71b6",
       "excluded": [],
       "files": 56,
       "manifest": "components/skeleton-base.manifest",
-      "manifest_sha256": "87bc08493a8339f760869dc82b887bb63b783769a28060a6a72ae38917af7e68",
+      "manifest_sha256": "9be2e1d5aa556d123d528642f584e1cc4a32e6c85bb41176f41c95c8ad6c8e44",
       "path": "components/skeleton-base",
       "repo": "https://github.com/<owner>/skeleton-base",
       "vendored_from": "local",
-      "version": "1.7.6"
+      "version": "1.7.7"
     }
   },
   "lock_version": 1

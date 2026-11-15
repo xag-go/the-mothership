@@ -2,6 +2,10 @@
 
 ## v1.2.18 (2026-11-15)
 
+- Vendors Skeleton Base 1.7.7 `7632773` (the 2026-11-15 general review: products and server pages, doctor checks on
+  repos, dead links, merged worktrees, tracked-but-ignored files, project secrets; sessions and memories fixed; the
+  parallel-sessions rule kept by updates) and Frugal-Bridge 2.46 `0d76b87` (rules load once in the base: a pointer
+  block instead of a second full copy; one hook entry).
 - `install.py offsite`: one encrypted archive of the vault, the base's registry files and the newest entry of each
   backup folder (capped, 500 MB by default; never the base itself) in a folder of its own outside the base (default
   `~/offsite-copy`, mode 700). Encrypted with `age` when it is installed, else `openssl` AES-256 (PBKDF2), using a

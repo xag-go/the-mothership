@@ -1025,3 +1025,35 @@ Readings:
 - Not done: the other tools whose skills are "shared" (Gemini, Qwen, opencode, ...) keep the shared folder: their own
   folders are not documented in this kit yet. Codex also reads the shared folder, so while a shared-reading tool is
   installed Codex sees the same skills there too.
+
+### 2.46 The rules load once in a knowledge base that has both installs; one hook entry per event (2026-11-15)
+- Found (general review 2026-11-15): a base with its own install and the user-level install held the same rules
+  block twice, byte for byte (9,190 bytes: each tool's user-level rules file and the base's `AGENTS.md`), so every
+  session and every helper started in the base loaded about 2,300 extra tokens. The Frugal hook was declared in
+  both settings files for SessionStart and UserPromptSubmit.
+- Hook, measured with the real script (`kit/test_rules_once.py`, two entries, same event payload): both commands
+  start. With one shared `FRUGAL_HOME` the once-guard keeps the second silent (the case on the reviewed machine,
+  where the variable is in the sessions' environment). When the base copy starts without `FRUGAL_HOME` and the
+  user-level home is not `~/.frugal-bridge`, the two use different guard folders and the start hint is added twice.
+- Change: while the user-level install serves the base (`global.json` `base` = that folder, rules written for at
+  least one tool), the base's block is a pointer (437 bytes) and the whole text is in
+  `<base>/.frugal-bridge/RULES.md`; the pointer tells a tool whose context has no CORE rules heading to read that
+  file. The base's `.claude/settings.json` gets no Frugal entry when the user-level install has Claude Code's (a
+  file that held only ours is removed, not left empty). `install --global` converts a base installed earlier (the
+  Mothership's order), `uninstall --global` puts the whole text and the entries back, `uninstall <base>` restores
+  every byte. Same block markers, so order checks and the Mothership's checks are unchanged. Every other folder is
+  unchanged: a project install keeps the whole block (its files travel with the project); a folder without an
+  install gets the rules from the user-level file as before. `check <base>` names the mode and a missing fallback
+  file. Folder uninstall no longer rewrites a `.claude/settings.json` that holds nothing of ours. `RELEASE = "2.46"`.
+- Tests: `kit/test_rules_once.py` 17 new: for claude-code, codex, gemini and opencode the text loaded at session
+  start (user-level file + project file with the `@AGENTS.md` import) holds the rules exactly once in the base and
+  in another folder, for both install orders; re-runs change no byte; uninstall in each order; other project, base
+  without its own install and a base of another registry untouched; edited fallback kept; hook entries.
+  Checked with the Mothership 1.2.17's own suite on a scratch copy with this release vendored: its uninstall safety
+  net put `RULES.md` back as "your file" (19 failures) until the file's hash was listed in the base's `.kits.json`
+  `template_hashes`, which that safety net reads; with it the same suite passes.
+- Not done: no model A/B run (rule 8). The rules text is unchanged and a tool wired at user level loads the same
+  bytes as before from its own file; what is new is the pointer sentence, read only by a tool with no user-level
+  copy, and whether such a tool follows it was not measured with a model. The role block of the knowledge base is
+  also in both files: that block is the base's, not changed here. A second Claude config dir that is not wired
+  has no Frugal hooks in the base any more (it had none in other folders).

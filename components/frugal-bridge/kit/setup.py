@@ -17,6 +17,8 @@ present, key-level JSON merge for host settings, idempotent, reversible, backups
 folder and every new session with nothing more to do; hooks/skills/plugin are installed at user level too. The user
 file lives in ~/.frugal-bridge/USER.md (FRUGAL_HOME to move it). Per-project files (PROGRESS, PROJECT, DECISIONS) are
 created in a project only when there is something to put in them.
+A knowledge base that has a folder install too gets the rules once: while --global serves it, its AGENTS.md block is a
+short pointer (whole text in <base>/.frugal-bridge/RULES.md) and its .claude/settings.json has no Frugal hook entry.
 
 The rules (AGENTS.md block, pointer files, skills, templates) work with any agent. The adapter is picked
 automatically (`--hosts auto`, the default): for every agent tool found it uses the strongest way that tool allows —
@@ -36,7 +38,7 @@ ROOT = os.path.dirname(KIT)
 sys.path.insert(0, KIT)
 import hosts as HOSTS  # noqa: E402  (kit/hosts.py: the table of agent tools)
 VERSION = "6"          # rules-block marker (changes only when the block format changes)
-RELEASE = "2.45"       # the Frugal-Bridge release: what install --global and the base compare
+RELEASE = "2.46"       # the Frugal-Bridge release: what install --global and the base compare
 START, END = "<!-- frugal-bridge:start v{v} -->", "<!-- frugal-bridge:end -->"
 START_RE = re.compile(r"<!-- frugal-bridge:start v[^>]*-->")
 BASE_END = "<!-- base-folder:end -->"
@@ -48,6 +50,15 @@ HOOK_TAG = "# frugal-bridge-hook"                # stable marker: independent of
 HOOK_FILE = "frugal_hook.py"
 DEFAULT_SLOTS = {"user": "USER.md", "now": "PROGRESS.md", "decisions": "DECISIONS.md", "map": "MAP.md", "sources": "sources/"}
 SLOT_TEMPLATES = {"user": "USER.md", "now": "PROGRESS.md", "decisions": "DECISIONS.md"}
+# One copy of the rules per session. A knowledge base with its own install that is also the base of the user-level
+# install would load them twice (each tool's user-level rules file + the base's AGENTS.md). While the user-level
+# install serves the base, the base's block is this pointer and the whole text sits in RULES_FILE inside the base
+# (a relative path: every tool that can read the folder can read it, also one the user-level install did not wire).
+RULES_FILE = ".frugal-bridge/RULES.md"
+RULES_POINTER = """# Frugal-Bridge CORE rules: loaded once
+The Frugal-Bridge CORE rules (token use + quality) are not repeated in this file: your tool's own user-level rules
+file holds them, so they are already in your context. Only if the heading "AGENTS.md — Frugal-Bridge CORE rules" is
+nowhere in your context: read `.frugal-bridge/RULES.md` in this folder now (the same text) and follow it."""
 
 
 def sha(b):
@@ -326,6 +337,116 @@ class Setup:
         self.change(rel, new)
         return mode
 
+    # ---------------------------------------------------------------- one copy of the rules, one hook entry
+    def global_cover(self):
+        """The user-level install's registry ($FRUGAL_HOME/global.json) when this folder is the knowledge base it
+        serves and it wrote the rules for at least one tool; else None. Any other folder is never "covered": a
+        project's files travel with the project (git, other people, other machines), so its install stays whole."""
+        try:
+            r = json.loads(read(os.path.join(frugal_home(), "global.json")) or "{}")
+        except (json.JSONDecodeError, OSError):
+            return None
+        b = r.get("base") if isinstance(r, dict) else None
+        if not b or not isinstance(b, str) or os.path.realpath(b) != os.path.realpath(self.d):
+            return None
+        tools = r.get("tools") or {}
+        return r if any(i.get("file") or i.get("rules_copy") for i in tools.values() if isinstance(i, dict)) else None
+
+    @staticmethod
+    def rules_text():
+        return open(os.path.join(KIT, "AGENTS.md")).read() + "\n\n" + open(os.path.join(KIT, "ROUTING.md")).read()
+
+    def put_rules(self, me):
+        """The rules block of this folder's AGENTS.md: the whole text, or (the user-level install serves this base)
+        the short pointer plus the whole text in RULES_FILE. Returns (mode, sha of RULES_FILE or None)."""
+        full = self.rules_text()
+        if self.global_cover():
+            text = full.rstrip() + "\n"
+            self.change(RULES_FILE, text)
+            self._modes["AGENTS.md"] = self.put_block("AGENTS.md", RULES_POINTER)
+            return "pointer", sha(text)
+        self._modes["AGENTS.md"] = self.put_block("AGENTS.md", full)
+        self.drop_rules_file(me)
+        return "full", None
+
+    def drop_rules_file(self, me):
+        """Remove RULES_FILE when it is ours and unchanged; a file the user changed is kept."""
+        f = self.p(RULES_FILE)
+        cur = read(f)
+        if cur is None:
+            return
+        if sha(cur) == (me or {}).get("rules_sha") or cur.strip() == self.rules_text().strip():
+            os.remove(f)
+        else:
+            self.log.append(f"kept {RULES_FILE} (you changed it)")
+
+    def claude_hooks(self, created):
+        """This folder's Claude Code hook entries in .claude/settings.json (merged key by key). While the user-level
+        install serves this base and has its own entries for Claude Code, none are written here and ours are taken
+        out: two declared entries start the script twice per event (and answer twice when their homes differ)."""
+        rel = ".claude/settings.json"
+        t = read(self.p(rel))
+        try:
+            data = json.loads(t) if t and t.strip() else {}
+        except json.JSONDecodeError:
+            raise SystemExit(f"{rel} is not valid JSON; fix it by hand first (nothing changed there).")
+        cover = self.global_cover()
+        if cover and "claude-code" in (cover.get("native_hooks") or []):
+            if t is None:
+                return
+            had = json.dumps(data, sort_keys=True)
+            self.drop_hooks(data)
+            if json.dumps(data, sort_keys=True) == had:
+                return
+            if not data and rel in created:
+                self.backup(rel); os.remove(self.p(rel)); created.discard(rel)
+                self.log.append(f"removed {rel} (only Frugal-Bridge's hook entries were in it; the user-level ones serve this base)")
+            else:
+                self.change(rel, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            return
+        if t is None:
+            created.add(rel)
+        self.merge_hooks(data, ("SessionStart", "UserPromptSubmit"), self.p(HOOK_MARK))   # replaces our old entries
+        self.change(rel, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+    def resync(self):
+        """Run by the user-level install and uninstall for the knowledge base they serve. When that base has its own
+        install, its rules block and its Claude Code hook entries follow: pointer and no entries while it is served,
+        the whole text and its own entries again when the user-level install is gone. Nothing else is touched."""
+        try:
+            k = self.kits()
+        except SystemExit:
+            return []
+        me = (k.get("kits") or {}).get("frugal-bridge")
+        if not isinstance(me, dict):
+            return []
+        v = str(me.get("version", "0"))
+        if v.isdigit() and int(v) > int(VERSION):
+            return [f"a newer Frugal-Bridge is installed in this folder (block v{v}): its rules block is left as it is"]
+        self._modes = dict(me.get("placement", {}))
+        created = set(me.get("created", []))
+        mode, rsha = self.put_rules(me)
+        if "claude-code" in (me.get("adapters") or []):
+            self.claude_hooks(created)
+        self.record_rules(me, mode, rsha)
+        me["placement"], me["created"] = self._modes, sorted(created)
+        self.save_kits(k)
+        return self.log
+
+    def record_rules(self, entry, mode, rsha):
+        bs = entry.setdefault("block_sha", {})
+        h = self.block_sha_of(self.p("AGENTS.md"))
+        if h and h not in bs.setdefault("AGENTS.md", []):
+            bs["AGENTS.md"].append(h)
+        entry.pop("rules", None); entry.pop("rules_sha", None)
+        th = entry.setdefault("template_hashes", {})
+        th.pop(RULES_FILE, None)
+        if mode == "pointer":
+            entry["rules"], entry["rules_sha"] = "pointer", rsha
+            # listed with the files Frugal wrote from its own text: an installer that puts back "your" files after
+            # an uninstall (the Mothership's safety net reads this list) then knows this one is ours
+            th[RULES_FILE] = rsha
+
     # ---------------------------------------------------------------- install
     def install(self, hosts=("claude-code", "gemini"), hermes_home=None):
         os.makedirs(self.d, exist_ok=True)
@@ -337,10 +458,9 @@ class Setup:
         base = "base-folder" in kits
         self._modes = dict(prev.get("placement", {}))
 
-        # 1. AGENTS.md block (after the base block when present)
+        # 1. AGENTS.md block (after the base block when present): the rules, or the pointer (see put_rules)
         existed = os.path.exists(self.p("AGENTS.md"))
-        self._modes["AGENTS.md"] = self.put_block(
-            "AGENTS.md", open(os.path.join(KIT, "AGENTS.md")).read() + "\n\n" + open(os.path.join(KIT, "ROUTING.md")).read())
+        rules_mode, rules_sha = self.put_rules(prev)
         if not existed:
             created.add("AGENTS.md")
 
@@ -396,6 +516,7 @@ class Setup:
             entry["hermes_home"] = kits_hermes
             bp = prev.get("hermes_backend_prev") or hermes_backend(kits_hermes)
             entry["hermes_backend_prev"] = bp if bp != TIERS_BACKEND else "default"
+        self.record_rules(entry, rules_mode, rules_sha)
         kits["frugal-bridge"] = entry
         self.save_kits(k)
         return self.check(), self.log
@@ -413,16 +534,7 @@ class Setup:
             if read(self.p(rel)) != body:
                 write(self.p(rel), body)
             self.note_written(self.p(rel))
-        rel = ".claude/settings.json"
-        t = read(self.p(rel))
-        try:
-            data = json.loads(t) if t and t.strip() else {}
-        except json.JSONDecodeError:
-            raise SystemExit(f"{rel} is not valid JSON; fix it by hand first (nothing changed there).")
-        if t is None:
-            created.add(rel)
-        self.merge_hooks(data, ("SessionStart", "UserPromptSubmit"), dst)   # replaces our old entries
-        self.change(rel, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        self.claude_hooks(created)
 
     @staticmethod
     def _is_ours(group):
@@ -498,11 +610,13 @@ class Setup:
         t = read(self.p(rel))
         if t:
             data = json.loads(t)
+            had = json.dumps(data, sort_keys=True)
             self.drop_hooks(data)
             if not data and rel in created:
                 self.backup(rel); os.remove(self.p(rel))
-            else:
+            elif json.dumps(data, sort_keys=True) != had:      # nothing of ours in it: the user's bytes stay
                 self.change(rel, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        self.drop_rules_file(me)
         for sk in os.listdir(os.path.join(KIT, "skills")):
             kept += [os.path.relpath(x, self.d) for x in
                      self.remove_copy(self.p(f".claude/skills/{sk}"), os.path.join(KIT, "skills", sk), written)]
@@ -565,6 +679,19 @@ class Setup:
         t = read(self.p("AGENTS.md")) or ""
         n = len(START_RE.findall(t))
         out.append(f"AGENTS.md frugal block: {n}"); ok &= n == 1
+        me = (self.kits().get("kits") or {}).get("frugal-bridge") or {}
+        covered = bool(self.global_cover())
+        if me.get("rules") == "pointer":
+            ex = os.path.isfile(self.p(RULES_FILE))
+            out.append(f"rules: a pointer here, one copy per session (each tool's user-level rules file holds them; "
+                       f"the whole text for a tool without it: {RULES_FILE}{'' if ex else ' — MISSING, re-run install'})")
+            ok &= ex
+            if not covered:
+                out.append("  note: no user-level install serves this folder now (this FRUGAL_HOME): re-run install "
+                           "here to put the whole rules back in AGENTS.md")
+        elif covered and n:
+            out.append("  note: the user-level install serves this base too, so the rules load twice here: re-run "
+                       "install (this folder or --global) to leave a pointer")
         b = len(t.encode())
         if b > CODEX_LIMIT:
             out.append(f"AGENTS.md size {b} bytes > {CODEX_LIMIT} (Codex reads only the first 32 KiB): shorten a block"); ok = False
@@ -996,6 +1123,7 @@ class GlobalSetup(Setup):
             r.pop("config_dirs")
         insts = [(t, t, None) for t in sel] + [(f"{t}@{d}", t, d) for t, d in extras]
         user = os.path.join(self.d, "USER.md")
+        base_was = r.get("base")
         base = find_base(HOSTS.rules_candidates(), os.path.expanduser("~"),
                          (getattr(self, "base_arg", None), os.environ.get("FRUGAL_BASE"), r.get("base")))
         rules = open(os.path.join(KIT, "AGENTS.md")).read() + "\n\n" + open(os.path.join(KIT, "ROUTING.md")).read() + "\n"
@@ -1092,7 +1220,15 @@ class GlobalSetup(Setup):
         r["version"] = VERSION
         r["written"] = {**(r.get("written") or {}), **(getattr(self, "written", None) or {})}
         write(self.reg_path(), json.dumps(r, indent=2) + "\n")
+        self.resync_bases(r.get("base"), base_was)
         return self.check(), self.log
+
+    def resync_bases(self, *bases):
+        """The knowledge base this install serves (and one it served before): its own Frugal install, when it has
+        one, follows — a pointer instead of a second copy of the rules, no second hook entry (Setup.resync)."""
+        for b in dict.fromkeys(x for x in bases if x and isinstance(x, str)):
+            if os.path.isdir(b):
+                self.log += [f"{b}: {line}" for line in Setup(b).resync()]
 
     def _wire_rules(self, r, tools, ik, t, home, body, tier_txt, files, via, done_files):
         """Step 3 of install for one instance (the caller set its home): its rules block, or the file it shares."""
@@ -1345,6 +1481,7 @@ class GlobalSetup(Setup):
                 os.remove(os.path.join(self.d, f))
         if os.path.isdir(os.path.join(self.d, "once")):
             shutil.rmtree(os.path.join(self.d, "once"), ignore_errors=True)
+        self.resync_bases(r.get("base"))      # the base's own install is the only copy again: whole text, own hooks
         for d in sorted(r.get("made_dirs", []), key=len, reverse=True):   # folders we made, only if now empty
             if os.path.isdir(d) and not os.listdir(d):
                 os.rmdir(d)

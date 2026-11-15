@@ -44,6 +44,15 @@ candidates, then test on your own tasks (AGENTS.md section 8).
   DECISIONS files and its adapters read the base's `slots` (e.g. now = `hot.md`, user = `wiki/me/README.md`).
 - Size: `setup.py check` measures the whole `AGENTS.md` (all blocks): some tools read only the first 32 KiB.
 - Pointer files: `@AGENTS.md` (some tools also accept a setting that names `AGENTS.md` as their context file).
+- **One copy of the rules per session.** A knowledge base that has its own install (`install <base>`) and is also
+  the base of the user-level install (`install --global`) would load the rules twice: from each tool's user-level
+  rules file and from the base's `AGENTS.md`. While the user-level install serves the base, the base's block is a
+  short pointer (about 440 bytes instead of 9,200) and the whole text is in `<base>/.frugal-bridge/RULES.md`, which
+  the pointer names for a tool that has no user-level copy. The base's `.claude/settings.json` then carries no
+  Frugal hook entry either (the user-level entries run in every folder). Either install order ends in the same
+  files; `uninstall --global` puts the whole text and the hook entries back in the base. Any other project folder
+  keeps the whole block: its files travel with the project. A second Claude config dir that is not wired
+  (`--claude-config-dir`) gets the pointer and no hooks in the base, as in every other folder.
 
 ## Relocated or several config dirs
 
